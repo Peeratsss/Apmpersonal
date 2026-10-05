@@ -17,11 +17,15 @@ static HHOOK keyboardHook = nullptr;
 static HHOOK mouseHook = nullptr;
 
 static std::vector<ULONGLONG> actions;
-
-// Protects the action list from keyboard/mouse hook + timer access.
 static CRITICAL_SECTION actionLock;
 
 static bool clickable = false;
+
+// Maximum repeated key actions while a key is held.
+static const int MAX_KEY_REPEATS = 5;
+
+// Tracks how many times each virtual key has been counted.
+static unsigned char keyRepeatCount[256] = {};
 
 static const UINT WM_TRAYICON = WM_USER + 1;
 
@@ -38,10 +42,8 @@ enum
 // REMOVE ACTIONS OLDER THAN 60 SECONDS
 // ============================================================
 
-void RemoveOldActions()
+void RemoveOldActionsLocked()
 {
-    EnterCriticalSection(&actionLock);
-
     ULONGLONG now = GetTickCount64();
     const ULONGLONG window = 60000;
 
@@ -59,6 +61,14 @@ void RemoveOldActions()
         actions.begin(),
         it
     );
+}
+
+
+void RemoveOldActions()
+{
+    EnterCriticalSection(&actionLock);
+
+    RemoveOldActionsLocked();
 
     LeaveCriticalSection(&actionLock);
 }
@@ -74,23 +84,7 @@ void Action()
 
     actions.push_back(GetTickCount64());
 
-    ULONGLONG now = GetTickCount64();
-    const ULONGLONG window = 60000;
-
-    ULONGLONG cutoff =
-        (now > window) ? now - window : 0;
-
-    auto it =
-        std::lower_bound(
-            actions.begin(),
-            actions.end(),
-            cutoff
-        );
-
-    actions.erase(
-        actions.begin(),
-        it
-    );
+    RemoveOldActionsLocked();
 
     LeaveCriticalSection(&actionLock);
 }
@@ -104,26 +98,12 @@ int GetAPM()
 {
     EnterCriticalSection(&actionLock);
 
-    ULONGLONG now = GetTickCount64();
-    const ULONGLONG window = 60000;
-
-    ULONGLONG cutoff =
-        (now > window) ? now - window : 0;
-
-    auto it =
-        std::lower_bound(
-            actions.begin(),
-            actions.end(),
-            cutoff
-        );
-
-    actions.erase(
-        actions.begin(),
-        it
-    );
+    RemoveOldActionsLocked();
 
     int result =
-        static_cast<int>(actions.size());
+        static_cast<int>(
+            actions.size()
+        );
 
     LeaveCriticalSection(&actionLock);
 
@@ -173,11 +153,13 @@ void SetClickable(bool value)
 
     if (clickable)
     {
+        // Opaque/editable mode.
         exStyle &= ~WS_EX_TRANSPARENT;
         style |= WS_THICKFRAME;
     }
     else
     {
+        // Completely transparent background.
         exStyle |= WS_EX_TRANSPARENT;
         style &= ~WS_THICKFRAME;
     }
@@ -223,6 +205,16 @@ void ToggleClickable()
 
 // ============================================================
 // KEYBOARD HOOK
+//
+// A key can repeat up to 5 times while held.
+//
+// Example:
+//
+// E E E E E       = 5 actions
+// E E E E E E E   = still 5 actions
+//
+// Release E -> pressing E again starts at 1.
+// This applies independently to every keyboard key.
 // ============================================================
 
 LRESULT CALLBACK KeyboardProc(
@@ -232,22 +224,44 @@ LRESULT CALLBACK KeyboardProc(
 {
     if (code == HC_ACTION)
     {
-        if (wParam == WM_KEYDOWN ||
-            wParam == WM_SYSKEYDOWN)
-        {
-            KBDLLHOOKSTRUCT* k =
-                reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        KBDLLHOOKSTRUCT* k =
+            reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-            if (k != nullptr &&
-                k->vkCode != VK_F8 &&
-                k->vkCode != VK_F9)
+        if (k != nullptr)
+        {
+            UINT vk = k->vkCode;
+
+            if (vk < 256)
             {
-                Action();
+                // Key is being pressed.
+                if (wParam == WM_KEYDOWN ||
+                    wParam == WM_SYSKEYDOWN)
+                {
+                    // Ignore F8/F9.
+                    if (vk != VK_F8 &&
+                        vk != VK_F9)
+                    {
+                        if (keyRepeatCount[vk] <
+                            MAX_KEY_REPEATS)
+                        {
+                            keyRepeatCount[vk]++;
+
+                            Action();
+                        }
+                    }
+                }
+
+                // Key released.
+                else if (wParam == WM_KEYUP ||
+                         wParam == WM_SYSKEYUP)
+                {
+                    keyRepeatCount[vk] = 0;
+                }
             }
         }
     }
 
-    // NEVER block the keyboard event.
+    // NEVER block the keyboard.
     return CallNextHookEx(
         nullptr,
         code,
@@ -277,7 +291,7 @@ LRESULT CALLBACK MouseProc(
         }
     }
 
-    // NEVER block the mouse event.
+    // Always pass mouse events through.
     return CallNextHookEx(
         nullptr,
         code,
@@ -413,6 +427,10 @@ LRESULT CALLBACK WindowProc(
 {
     switch (msg)
     {
+        // ----------------------------------------------------
+        // Tray
+        // ----------------------------------------------------
+
         case WM_TRAYICON:
 
             if (lParam == WM_RBUTTONUP)
@@ -420,6 +438,10 @@ LRESULT CALLBACK WindowProc(
 
             return 0;
 
+
+        // ----------------------------------------------------
+        // Menu
+        // ----------------------------------------------------
 
         case WM_COMMAND:
 
@@ -441,7 +463,10 @@ LRESULT CALLBACK WindowProc(
             return 0;
 
 
-        // Update display every 5 seconds.
+        // ----------------------------------------------------
+        // Update every 5 seconds
+        // ----------------------------------------------------
+
         case WM_TIMER:
 
             RemoveOldActions();
@@ -454,6 +479,10 @@ LRESULT CALLBACK WindowProc(
 
             return 0;
 
+
+        // ----------------------------------------------------
+        // Click-through / clickable
+        // ----------------------------------------------------
 
         case WM_NCHITTEST:
 
@@ -468,8 +497,13 @@ LRESULT CALLBACK WindowProc(
             );
 
 
-        // Top 10 pixels = resize.
-        // Rest = move.
+        // ----------------------------------------------------
+        // Clickable Mode
+        //
+        // Top 10 pixels = resize
+        // Rest = move
+        // ----------------------------------------------------
+
         case WM_LBUTTONDOWN:
 
             if (clickable)
@@ -514,6 +548,10 @@ LRESULT CALLBACK WindowProc(
             return 0;
 
 
+        // ----------------------------------------------------
+        // Cursor
+        // ----------------------------------------------------
+
         case WM_SETCURSOR:
 
             if (clickable)
@@ -554,6 +592,10 @@ LRESULT CALLBACK WindowProc(
             break;
 
 
+        // ----------------------------------------------------
+        // Paint
+        // ----------------------------------------------------
+
         case WM_PAINT:
         {
             PAINTSTRUCT ps{};
@@ -571,18 +613,28 @@ LRESULT CALLBACK WindowProc(
                 &r
             );
 
-            HBRUSH bg =
-                CreateSolidBrush(
-                    RGB(20, 20, 20)
+
+            // ------------------------------------------------
+            // Clickable Mode = opaque background
+            // Normal Mode = transparent background
+            // ------------------------------------------------
+
+            if (clickable)
+            {
+                HBRUSH bg =
+                    CreateSolidBrush(
+                        RGB(20, 20, 20)
+                    );
+
+                FillRect(
+                    dc,
+                    &r,
+                    bg
                 );
 
-            FillRect(
-                dc,
-                &r,
-                bg
-            );
+                DeleteObject(bg);
+            }
 
-            DeleteObject(bg);
 
             SetBkMode(
                 dc,
@@ -594,9 +646,34 @@ LRESULT CALLBACK WindowProc(
                 RGB(255, 255, 255)
             );
 
+
+            // ------------------------------------------------
+            // Scale font with window height.
+            // ------------------------------------------------
+
+            int width =
+                r.right - r.left;
+
+            int height =
+                r.bottom - r.top;
+
+            int fontHeight =
+                height * 60 / 100;
+
+            if (fontHeight < 8)
+                fontHeight = 8;
+
+            if (fontHeight > 200)
+                fontHeight = 200;
+
+
+            // ------------------------------------------------
+            // Use Radiance Sans
+            // ------------------------------------------------
+
             HFONT font =
                 CreateFontW(
-                    -22,
+                    -fontHeight,
                     0,
                     0,
                     0,
@@ -609,8 +686,9 @@ LRESULT CALLBACK WindowProc(
                     CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY,
                     DEFAULT_PITCH,
-                    L"Segoe UI"
+                    L"Radiance Sans"
                 );
+
 
             HFONT old =
                 reinterpret_cast<HFONT>(
@@ -620,11 +698,15 @@ LRESULT CALLBACK WindowProc(
                     )
                 );
 
+
+            // ONLY APM
+
             std::wstring text =
                 L"APM " +
                 std::to_wstring(
                     GetAPM()
                 );
+
 
             DrawTextW(
                 dc,
@@ -633,8 +715,10 @@ LRESULT CALLBACK WindowProc(
                 &r,
                 DT_CENTER |
                 DT_VCENTER |
-                DT_SINGLELINE
+                DT_SINGLELINE |
+                DT_NOPREFIX
             );
+
 
             SelectObject(
                 dc,
@@ -642,6 +726,7 @@ LRESULT CALLBACK WindowProc(
             );
 
             DeleteObject(font);
+
 
             EndPaint(
                 hwnd,
@@ -651,6 +736,10 @@ LRESULT CALLBACK WindowProc(
             return 0;
         }
 
+
+        // ----------------------------------------------------
+        // Destroy
+        // ----------------------------------------------------
 
         case WM_DESTROY:
 
@@ -711,6 +800,44 @@ int WINAPI WinMain(
         &actionLock
     );
 
+
+    // --------------------------------------------------------
+    // Load Radiance Sans from the EXE's folder.
+    // --------------------------------------------------------
+
+    wchar_t exePath[MAX_PATH]{};
+
+    GetModuleFileNameW(
+        nullptr,
+        exePath,
+        MAX_PATH
+    );
+
+    std::wstring path(exePath);
+
+    size_t slash =
+        path.find_last_of(
+            L"\\/"
+        );
+
+    if (slash != std::wstring::npos)
+    {
+        path.resize(
+            slash + 1
+        );
+    }
+
+    path += L"Radiance_Sans.ttf";
+
+
+    // Add the font temporarily for this process.
+    AddFontResourceExW(
+        path.c_str(),
+        FR_PRIVATE,
+        nullptr
+    );
+
+
     WNDCLASSW wc{};
 
     wc.hInstance =
@@ -758,6 +885,12 @@ int WINAPI WinMain(
 
     if (!hwnd)
     {
+        RemoveFontResourceExW(
+            path.c_str(),
+            FR_PRIVATE,
+            nullptr
+        );
+
         DeleteCriticalSection(
             &actionLock
         );
@@ -766,10 +899,12 @@ int WINAPI WinMain(
     }
 
 
+    // Alpha is only used for the text/window surface.
+    // Normal mode remains visually transparent.
     SetLayeredWindowAttributes(
         hwnd,
         0,
-        225,
+        255,
         LWA_ALPHA
     );
 
@@ -811,6 +946,12 @@ int WINAPI WinMain(
                 mouseHook
             );
 
+        RemoveFontResourceExW(
+            path.c_str(),
+            FR_PRIVATE,
+            nullptr
+        );
+
         DeleteCriticalSection(
             &actionLock
         );
@@ -822,8 +963,8 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
-    // Display update: every 5 seconds.
-    // APM history: rolling 60 seconds.
+    // Display updates every 5 seconds.
+    // APM remains a rolling 60-second window.
 
     SetTimer(
         hwnd,
@@ -856,6 +997,14 @@ int WINAPI WinMain(
             &msg
         );
     }
+
+
+    RemoveFontResourceExW(
+        path.c_str(),
+        FR_PRIVATE,
+        nullptr
+    );
+
 
     return 0;
 }
