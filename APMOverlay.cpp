@@ -21,10 +21,12 @@ static CRITICAL_SECTION actionLock;
 
 static bool clickable = false;
 
-// Maximum repeated key actions while a key is held.
-static const int MAX_KEY_REPEATS = 5;
+// Current overlay dimensions.
+// These stay the same when switching between modes.
+static int overlayWidth = 150;
+static int overlayHeight = 45;
 
-// Tracks how many times each virtual key has been counted.
+static const int MAX_KEY_REPEATS = 5;
 static unsigned char keyRepeatCount[256] = {};
 
 static const UINT WM_TRAYICON = WM_USER + 1;
@@ -39,7 +41,7 @@ enum
 
 
 // ============================================================
-// REMOVE ACTIONS OLDER THAN 60 SECONDS
+// APM
 // ============================================================
 
 void RemoveOldActionsLocked()
@@ -67,16 +69,10 @@ void RemoveOldActionsLocked()
 void RemoveOldActions()
 {
     EnterCriticalSection(&actionLock);
-
     RemoveOldActionsLocked();
-
     LeaveCriticalSection(&actionLock);
 }
 
-
-// ============================================================
-// RECORD ACTION
-// ============================================================
 
 void Action()
 {
@@ -90,10 +86,6 @@ void Action()
 }
 
 
-// ============================================================
-// CURRENT APM
-// ============================================================
-
 int GetAPM()
 {
     EnterCriticalSection(&actionLock);
@@ -101,19 +93,13 @@ int GetAPM()
     RemoveOldActionsLocked();
 
     int result =
-        static_cast<int>(
-            actions.size()
-        );
+        static_cast<int>(actions.size());
 
     LeaveCriticalSection(&actionLock);
 
     return result;
 }
 
-
-// ============================================================
-// RESET
-// ============================================================
 
 void ResetAPM()
 {
@@ -123,98 +109,15 @@ void ResetAPM()
 
     LeaveCriticalSection(&actionLock);
 
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        FALSE
-    );
-}
-
-
-// ============================================================
-// CLICKABLE MODE
-// ============================================================
-
-void SetClickable(bool value)
-{
-    clickable = value;
-
-    LONG_PTR exStyle =
-        GetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE
-        );
-
-    LONG_PTR style =
-        GetWindowLongPtrW(
-            hwnd,
-            GWL_STYLE
-        );
-
-    if (clickable)
-    {
-        // Opaque/editable mode.
-        exStyle &= ~WS_EX_TRANSPARENT;
-        style |= WS_THICKFRAME;
-    }
-    else
-    {
-        // Completely transparent background.
-        exStyle |= WS_EX_TRANSPARENT;
-        style &= ~WS_THICKFRAME;
-    }
-
-    SetWindowLongPtrW(
-        hwnd,
-        GWL_EXSTYLE,
-        exStyle
-    );
-
-    SetWindowLongPtrW(
-        hwnd,
-        GWL_STYLE,
-        style
-    );
-
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE |
-        SWP_NOSIZE |
-        SWP_NOACTIVATE |
-        SWP_FRAMECHANGED
-    );
-
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        TRUE
-    );
-}
-
-
-void ToggleClickable()
-{
-    SetClickable(!clickable);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 
 // ============================================================
 // KEYBOARD HOOK
 //
-// A key can repeat up to 5 times while held.
-//
-// Example:
-//
-// E E E E E       = 5 actions
-// E E E E E E E   = still 5 actions
-//
-// Release E -> pressing E again starts at 1.
-// This applies independently to every keyboard key.
+// Every key can repeat up to 5 times while held.
+// Release = reset that key's repeat counter.
 // ============================================================
 
 LRESULT CALLBACK KeyboardProc(
@@ -227,41 +130,32 @@ LRESULT CALLBACK KeyboardProc(
         KBDLLHOOKSTRUCT* k =
             reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-        if (k != nullptr)
+        if (k && k->vkCode < 256)
         {
             UINT vk = k->vkCode;
 
-            if (vk < 256)
+            if (wParam == WM_KEYDOWN ||
+                wParam == WM_SYSKEYDOWN)
             {
-                // Key is being pressed.
-                if (wParam == WM_KEYDOWN ||
-                    wParam == WM_SYSKEYDOWN)
+                if (vk != VK_F8 &&
+                    vk != VK_F9)
                 {
-                    // Ignore F8/F9.
-                    if (vk != VK_F8 &&
-                        vk != VK_F9)
+                    if (keyRepeatCount[vk] < MAX_KEY_REPEATS)
                     {
-                        if (keyRepeatCount[vk] <
-                            MAX_KEY_REPEATS)
-                        {
-                            keyRepeatCount[vk]++;
-
-                            Action();
-                        }
+                        keyRepeatCount[vk]++;
+                        Action();
                     }
                 }
-
-                // Key released.
-                else if (wParam == WM_KEYUP ||
-                         wParam == WM_SYSKEYUP)
-                {
-                    keyRepeatCount[vk] = 0;
-                }
+            }
+            else if (wParam == WM_KEYUP ||
+                     wParam == WM_SYSKEYUP)
+            {
+                keyRepeatCount[vk] = 0;
             }
         }
     }
 
-    // NEVER block the keyboard.
+    // Never block keyboard input.
     return CallNextHookEx(
         nullptr,
         code,
@@ -291,7 +185,6 @@ LRESULT CALLBACK MouseProc(
         }
     }
 
-    // Always pass mouse events through.
     return CallNextHookEx(
         nullptr,
         code,
@@ -302,17 +195,15 @@ LRESULT CALLBACK MouseProc(
 
 
 // ============================================================
-// TRAY MENU
+// TRAY
 // ============================================================
 
 void ShowTrayMenu()
 {
     POINT p{};
-
     GetCursorPos(&p);
 
-    HMENU menu =
-        CreatePopupMenu();
+    HMENU menu = CreatePopupMenu();
 
     if (!menu)
         return;
@@ -361,10 +252,6 @@ void ShowTrayMenu()
     DestroyMenu(menu);
 }
 
-
-// ============================================================
-// TRAY ICON
-// ============================================================
 
 void AddTrayIcon()
 {
@@ -416,6 +303,345 @@ void RemoveTrayIcon()
 
 
 // ============================================================
+// CLICKABLE MODE
+// ============================================================
+
+void SetClickable(bool value)
+{
+    clickable = value;
+
+    LONG_PTR exStyle =
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE
+        );
+
+    LONG_PTR style =
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE
+        );
+
+    if (clickable)
+    {
+        // Allow interaction.
+        exStyle &= ~WS_EX_TRANSPARENT;
+
+        // Enable resizing.
+        style |= WS_THICKFRAME;
+    }
+    else
+    {
+        // Click-through.
+        exStyle |= WS_EX_TRANSPARENT;
+
+        // No visible Windows frame.
+        style &= ~WS_THICKFRAME;
+    }
+
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        exStyle
+    );
+
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_STYLE,
+        style
+    );
+
+    // IMPORTANT:
+    // Keep exactly the same physical window size.
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        overlayWidth,
+        overlayHeight,
+        SWP_NOMOVE |
+        SWP_NOACTIVATE |
+        SWP_FRAMECHANGED
+    );
+
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        TRUE
+    );
+}
+
+
+void ToggleClickable()
+{
+    SetClickable(!clickable);
+}
+
+
+// ============================================================
+// DRAW TRANSPARENT OVERLAY
+// ============================================================
+
+void DrawOverlay()
+{
+    RECT wr{};
+    GetWindowRect(hwnd, &wr);
+
+    int width =
+        wr.right - wr.left;
+
+    int height =
+        wr.bottom - wr.top;
+
+    if (width < 1)
+        width = 1;
+
+    if (height < 1)
+        height = 1;
+
+    overlayWidth = width;
+    overlayHeight = height;
+
+
+    HDC screenDC =
+        GetDC(nullptr);
+
+    HDC memDC =
+        CreateCompatibleDC(screenDC);
+
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize =
+        sizeof(BITMAPINFOHEADER);
+
+    bmi.bmiHeader.biWidth =
+        width;
+
+    bmi.bmiHeader.biHeight =
+        -height;
+
+    bmi.bmiHeader.biPlanes =
+        1;
+
+    bmi.bmiHeader.biBitCount =
+        32;
+
+    bmi.bmiHeader.biCompression =
+        BI_RGB;
+
+
+    void* bits = nullptr;
+
+    HBITMAP bitmap =
+        CreateDIBSection(
+            screenDC,
+            &bmi,
+            DIB_RGB_COLORS,
+            &bits,
+            nullptr,
+            0
+        );
+
+    HBITMAP oldBitmap =
+        (HBITMAP)SelectObject(
+            memDC,
+            bitmap
+        );
+
+
+    // Completely transparent background.
+    ZeroMemory(
+        bits,
+        static_cast<size_t>(width) *
+        static_cast<size_t>(height) *
+        4
+    );
+
+
+    // --------------------------------------------------------
+    // Font scales with the actual overlay height.
+    // Same calculation in BOTH modes.
+    // --------------------------------------------------------
+
+    int fontHeight =
+        (height * 62) / 100;
+
+    if (fontHeight < 8)
+        fontHeight = 8;
+
+    if (fontHeight > 300)
+        fontHeight = 300;
+
+
+    HFONT font =
+        CreateFontW(
+            -fontHeight,
+            0,
+            0,
+            0,
+            FW_BOLD,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY,
+            DEFAULT_PITCH,
+            L"Radiance Sans"
+        );
+
+
+    HFONT oldFont =
+        (HFONT)SelectObject(
+            memDC,
+            font
+        );
+
+
+    SetBkMode(
+        memDC,
+        TRANSPARENT
+    );
+
+    SetTextColor(
+        memDC,
+        RGB(255, 255, 255)
+    );
+
+
+    std::wstring text =
+        L"APM " +
+        std::to_wstring(
+            GetAPM()
+        );
+
+
+    RECT textRect{
+        0,
+        0,
+        width,
+        height
+    };
+
+
+    DrawTextW(
+        memDC,
+        text.c_str(),
+        -1,
+        &textRect,
+        DT_CENTER |
+        DT_VCENTER |
+        DT_SINGLELINE |
+        DT_NOPREFIX
+    );
+
+
+    SelectObject(
+        memDC,
+        oldFont
+    );
+
+    DeleteObject(font);
+
+
+    // --------------------------------------------------------
+    // Make the pixels containing the text opaque.
+    // Transparent background remains transparent.
+    // --------------------------------------------------------
+
+    DWORD* pixels =
+        static_cast<DWORD*>(bits);
+
+    const size_t pixelCount =
+        static_cast<size_t>(width) *
+        static_cast<size_t>(height);
+
+    for (size_t i = 0; i < pixelCount; ++i)
+    {
+        BYTE blue =
+            static_cast<BYTE>(
+                pixels[i] & 0xFF
+            );
+
+        BYTE green =
+            static_cast<BYTE>(
+                (pixels[i] >> 8) & 0xFF
+            );
+
+        BYTE red =
+            static_cast<BYTE>(
+                (pixels[i] >> 16) & 0xFF
+            );
+
+        BYTE brightness =
+            static_cast<BYTE>(
+                (red + green + blue) / 3
+            );
+
+        if (brightness > 0)
+        {
+            pixels[i] =
+                (static_cast<DWORD>(brightness) << 24) |
+                0x00FFFFFF;
+        }
+        else
+        {
+            pixels[i] = 0;
+        }
+    }
+
+
+    POINT source{0, 0};
+
+    POINT position{
+        wr.left,
+        wr.top
+    };
+
+    SIZE size{
+        width,
+        height
+    };
+
+
+    BLENDFUNCTION blend{};
+    blend.BlendOp =
+        AC_SRC_OVER;
+
+    blend.SourceConstantAlpha =
+        255;
+
+    blend.AlphaFormat =
+        AC_SRC_ALPHA;
+
+
+    UpdateLayeredWindow(
+        hwnd,
+        screenDC,
+        &position,
+        &size,
+        memDC,
+        &source,
+        0,
+        &blend,
+        ULW_ALPHA
+    );
+
+
+    SelectObject(
+        memDC,
+        oldBitmap
+    );
+
+    DeleteObject(bitmap);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+}
+
+
+// ============================================================
 // WINDOW PROCEDURE
 // ============================================================
 
@@ -427,10 +653,6 @@ LRESULT CALLBACK WindowProc(
 {
     switch (msg)
     {
-        // ----------------------------------------------------
-        // Tray
-        // ----------------------------------------------------
-
         case WM_TRAYICON:
 
             if (lParam == WM_RBUTTONUP)
@@ -438,10 +660,6 @@ LRESULT CALLBACK WindowProc(
 
             return 0;
 
-
-        // ----------------------------------------------------
-        // Menu
-        // ----------------------------------------------------
 
         case WM_COMMAND:
 
@@ -463,25 +681,17 @@ LRESULT CALLBACK WindowProc(
             return 0;
 
 
-        // ----------------------------------------------------
-        // Update every 5 seconds
-        // ----------------------------------------------------
-
         case WM_TIMER:
 
             RemoveOldActions();
 
-            InvalidateRect(
-                hwnd,
-                nullptr,
-                FALSE
-            );
+            DrawOverlay();
 
             return 0;
 
 
         // ----------------------------------------------------
-        // Click-through / clickable
+        // Click-through in pass mode.
         // ----------------------------------------------------
 
         case WM_NCHITTEST:
@@ -489,257 +699,92 @@ LRESULT CALLBACK WindowProc(
             if (!clickable)
                 return HTTRANSPARENT;
 
-            return DefWindowProcW(
-                h,
-                msg,
-                wParam,
-                lParam
-            );
-
-
-        // ----------------------------------------------------
-        // Clickable Mode
-        //
-        // Top 10 pixels = resize
-        // Rest = move
-        // ----------------------------------------------------
-
-        case WM_LBUTTONDOWN:
-
-            if (clickable)
             {
-                POINT p{};
-
-                GetCursorPos(&p);
+                POINT p{
+                    GET_X_LPARAM(lParam),
+                    GET_Y_LPARAM(lParam)
+                };
 
                 RECT r{};
-
                 GetWindowRect(
                     hwnd,
                     &r
                 );
 
-                if (p.y < r.top + 10)
+                int x =
+                    p.x - r.left;
+
+                int y =
+                    p.y - r.top;
+
+                int width =
+                    r.right - r.left;
+
+                const int grip = 10;
+
+                // Upper bar:
+                // corners resize diagonally,
+                // center resizes vertically.
+
+                if (y < grip)
                 {
-                    ReleaseCapture();
+                    if (x < grip)
+                        return HTTOPLEFT;
 
-                    SendMessageW(
-                        hwnd,
-                        WM_NCLBUTTONDOWN,
-                        HTTOP,
-                        0
-                    );
-                }
-                else
-                {
-                    ReleaseCapture();
+                    if (x >= width - grip)
+                        return HTTOPRIGHT;
 
-                    SendMessageW(
-                        hwnd,
-                        WM_NCLBUTTONDOWN,
-                        HTCAPTION,
-                        0
-                    );
+                    return HTTOP;
                 }
 
-                return 0;
+                // Whole body relocates.
+                return HTCAPTION;
             }
+
+
+        case WM_SIZE:
+
+            overlayWidth =
+                LOWORD(lParam);
+
+            overlayHeight =
+                HIWORD(lParam);
+
+            if (overlayWidth < 50)
+                overlayWidth = 50;
+
+            if (overlayHeight < 20)
+                overlayHeight = 20;
+
+            DrawOverlay();
 
             return 0;
 
-
-        // ----------------------------------------------------
-        // Cursor
-        // ----------------------------------------------------
-
-        case WM_SETCURSOR:
-
-            if (clickable)
-            {
-                POINT p{};
-
-                GetCursorPos(&p);
-
-                RECT r{};
-
-                GetWindowRect(
-                    hwnd,
-                    &r
-                );
-
-                if (p.y < r.top + 10)
-                {
-                    SetCursor(
-                        LoadCursorW(
-                            nullptr,
-                            IDC_SIZENS
-                        )
-                    );
-
-                    return TRUE;
-                }
-
-                SetCursor(
-                    LoadCursorW(
-                        nullptr,
-                        IDC_SIZEALL
-                    )
-                );
-
-                return TRUE;
-            }
-
-            break;
-
-
-        // ----------------------------------------------------
-        // Paint
-        // ----------------------------------------------------
 
         case WM_PAINT:
         {
             PAINTSTRUCT ps{};
 
-            HDC dc =
-                BeginPaint(
-                    hwnd,
-                    &ps
-                );
-
-            RECT r{};
-
-            GetClientRect(
+            BeginPaint(
                 hwnd,
-                &r
+                &ps
             );
-
-
-            // ------------------------------------------------
-            // Clickable Mode = opaque background
-            // Normal Mode = transparent background
-            // ------------------------------------------------
-
-            if (clickable)
-            {
-                HBRUSH bg =
-                    CreateSolidBrush(
-                        RGB(20, 20, 20)
-                    );
-
-                FillRect(
-                    dc,
-                    &r,
-                    bg
-                );
-
-                DeleteObject(bg);
-            }
-
-
-            SetBkMode(
-                dc,
-                TRANSPARENT
-            );
-
-            SetTextColor(
-                dc,
-                RGB(255, 255, 255)
-            );
-
-
-            // ------------------------------------------------
-            // Scale font with window height.
-            // ------------------------------------------------
-
-            int width =
-                r.right - r.left;
-
-            int height =
-                r.bottom - r.top;
-
-            int fontHeight =
-                height * 60 / 100;
-
-            if (fontHeight < 8)
-                fontHeight = 8;
-
-            if (fontHeight > 200)
-                fontHeight = 200;
-
-
-            // ------------------------------------------------
-            // Use Radiance Sans
-            // ------------------------------------------------
-
-            HFONT font =
-                CreateFontW(
-                    -fontHeight,
-                    0,
-                    0,
-                    0,
-                    FW_BOLD,
-                    FALSE,
-                    FALSE,
-                    FALSE,
-                    DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH,
-                    L"Radiance Sans"
-                );
-
-
-            HFONT old =
-                reinterpret_cast<HFONT>(
-                    SelectObject(
-                        dc,
-                        font
-                    )
-                );
-
-
-            // ONLY APM
-
-            std::wstring text =
-                L"APM " +
-                std::to_wstring(
-                    GetAPM()
-                );
-
-
-            DrawTextW(
-                dc,
-                text.c_str(),
-                -1,
-                &r,
-                DT_CENTER |
-                DT_VCENTER |
-                DT_SINGLELINE |
-                DT_NOPREFIX
-            );
-
-
-            SelectObject(
-                dc,
-                old
-            );
-
-            DeleteObject(font);
-
 
             EndPaint(
                 hwnd,
                 &ps
             );
 
+            DrawOverlay();
+
             return 0;
         }
 
 
-        // ----------------------------------------------------
-        // Destroy
-        // ----------------------------------------------------
+        case WM_ERASEBKGND:
+
+            return 1;
+
 
         case WM_DESTROY:
 
@@ -802,7 +847,7 @@ int WINAPI WinMain(
 
 
     // --------------------------------------------------------
-    // Load Radiance Sans from the EXE's folder.
+    // Load Radiance Sans
     // --------------------------------------------------------
 
     wchar_t exePath[MAX_PATH]{};
@@ -813,30 +858,36 @@ int WINAPI WinMain(
         MAX_PATH
     );
 
-    std::wstring path(exePath);
+    std::wstring fontPath(
+        exePath
+    );
 
     size_t slash =
-        path.find_last_of(
+        fontPath.find_last_of(
             L"\\/"
         );
 
     if (slash != std::wstring::npos)
     {
-        path.resize(
+        fontPath.resize(
             slash + 1
         );
     }
 
-    path += L"Radiance_Sans.ttf";
+    fontPath +=
+        L"Radiance_Sans.ttf";
 
 
-    // Add the font temporarily for this process.
     AddFontResourceExW(
-        path.c_str(),
+        fontPath.c_str(),
         FR_PRIVATE,
         nullptr
     );
 
+
+    // --------------------------------------------------------
+    // Window class
+    // --------------------------------------------------------
 
     WNDCLASSW wc{};
 
@@ -855,8 +906,14 @@ int WINAPI WinMain(
             IDC_ARROW
         );
 
-    RegisterClassW(&wc);
+    RegisterClassW(
+        &wc
+    );
 
+
+    // --------------------------------------------------------
+    // Create overlay
+    // --------------------------------------------------------
 
     hwnd =
         CreateWindowExW(
@@ -873,8 +930,8 @@ int WINAPI WinMain(
 
             20,
             20,
-            150,
-            45,
+            overlayWidth,
+            overlayHeight,
 
             nullptr,
             nullptr,
@@ -886,7 +943,7 @@ int WINAPI WinMain(
     if (!hwnd)
     {
         RemoveFontResourceExW(
-            path.c_str(),
+            fontPath.c_str(),
             FR_PRIVATE,
             nullptr
         );
@@ -899,15 +956,13 @@ int WINAPI WinMain(
     }
 
 
-    // Alpha is only used for the text/window surface.
-    // Normal mode remains visually transparent.
-    SetLayeredWindowAttributes(
-        hwnd,
-        0,
-        255,
-        LWA_ALPHA
-    );
+    // Initial transparent rendering.
+    DrawOverlay();
 
+
+    // --------------------------------------------------------
+    // Hooks
+    // --------------------------------------------------------
 
     keyboardHook =
         SetWindowsHookExW(
@@ -947,7 +1002,7 @@ int WINAPI WinMain(
             );
 
         RemoveFontResourceExW(
-            path.c_str(),
+            fontPath.c_str(),
             FR_PRIVATE,
             nullptr
         );
@@ -963,8 +1018,9 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
-    // Display updates every 5 seconds.
-    // APM remains a rolling 60-second window.
+    // --------------------------------------------------------
+    // Update every 5 seconds
+    // --------------------------------------------------------
 
     SetTimer(
         hwnd,
@@ -991,7 +1047,9 @@ int WINAPI WinMain(
         )
     )
     {
-        TranslateMessage(&msg);
+        TranslateMessage(
+            &msg
+        );
 
         DispatchMessageW(
             &msg
@@ -1000,11 +1058,10 @@ int WINAPI WinMain(
 
 
     RemoveFontResourceExW(
-        path.c_str(),
+        fontPath.c_str(),
         FR_PRIVATE,
         nullptr
     );
-
 
     return 0;
 }
