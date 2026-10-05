@@ -1,6 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
+#define UNICODE
+#define _UNICODE
+
 #include <windows.h>
-#include <windowsx.h>
+#include <shellapi.h>
 #include <array>
 #include <string>
 
@@ -8,9 +11,9 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 
-static HWND hwnd;
-static HHOOK keyboardHook;
-static HHOOK mouseHook;
+static HWND hwnd = nullptr;
+static HHOOK keyboardHook = nullptr;
+static HHOOK mouseHook = nullptr;
 
 static std::array<int, 60> buckets{};
 static int bucket = 0;
@@ -18,32 +21,46 @@ static long long total = 0;
 static ULONGLONG lastSecond = 0;
 static bool clickable = false;
 
-enum {
+enum
+{
     ID_TRAY = 100,
     ID_CLICKABLE = 101,
     ID_RESET = 102,
     ID_EXIT = 103
 };
 
+static const UINT WM_TRAYICON = WM_USER + 1;
+
+
+// ------------------------------------------------------------
+// APM
+// ------------------------------------------------------------
+
 void Advance()
 {
     ULONGLONG now = GetTickCount64() / 1000;
 
-    if (!lastSecond) {
+    if (!lastSecond)
+    {
         lastSecond = now;
         return;
     }
 
     ULONGLONG diff = now - lastSecond;
 
-    if (!diff) return;
+    if (!diff)
+        return;
 
-    if (diff >= 60) {
+    if (diff >= 60)
+    {
         buckets.fill(0);
         total = 0;
         bucket = 0;
-    } else {
-        for (ULONGLONG i = 0; i < diff; ++i) {
+    }
+    else
+    {
+        for (ULONGLONG i = 0; i < diff; ++i)
+        {
             bucket = (bucket + 1) % 60;
             total -= buckets[bucket];
             buckets[bucket] = 0;
@@ -53,70 +70,112 @@ void Advance()
     lastSecond = now;
 }
 
+
 void Action()
 {
     Advance();
+
     buckets[bucket]++;
     total++;
 }
 
+
 void ResetAPM()
 {
     buckets.fill(0);
+
     total = 0;
     bucket = 0;
+
     lastSecond = GetTickCount64() / 1000;
-    InvalidateRect(hwnd, nullptr, FALSE);
+
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
+    );
 }
+
+
+// ------------------------------------------------------------
+// Clickable / Pass-through
+// ------------------------------------------------------------
 
 void SetClickable(bool value)
 {
     clickable = value;
 
-    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    LONG_PTR style =
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE
+        );
 
     if (clickable)
+    {
         style &= ~WS_EX_TRANSPARENT;
+    }
     else
+    {
         style |= WS_EX_TRANSPARENT;
+    }
 
-    SetWindowLongPtr(hwnd, GWL_EXSTYLE, style);
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        style
+    );
 
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
         SWP_NOMOVE |
         SWP_NOSIZE |
         SWP_NOACTIVATE |
         SWP_FRAMECHANGED
     );
 
-    InvalidateRect(hwnd, nullptr, TRUE);
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        TRUE
+    );
 }
+
 
 void ToggleClickable()
 {
     SetClickable(!clickable);
 }
 
+
+// ------------------------------------------------------------
+// Keyboard hook
+// ------------------------------------------------------------
+
 LRESULT CALLBACK KeyboardProc(
     int code,
     WPARAM wParam,
     LPARAM lParam)
 {
-    if (code >= 0 &&
-        (wParam == WM_KEYDOWN ||
-         wParam == WM_SYSKEYDOWN))
+    if (code >= 0)
     {
-        KBDLLHOOKSTRUCT* k =
-            (KBDLLHOOKSTRUCT*)lParam;
-
-        // Don't count our own hotkeys.
-        if (k->vkCode != VK_F8 &&
-            k->vkCode != VK_F9)
+        if (wParam == WM_KEYDOWN ||
+            wParam == WM_SYSKEYDOWN)
         {
-            Action();
+            KBDLLHOOKSTRUCT* k =
+                reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+
+            // Ignore F8/F9 if ever used as shortcuts.
+            if (k->vkCode != VK_F8 &&
+                k->vkCode != VK_F9)
+            {
+                Action();
+            }
         }
     }
 
@@ -128,12 +187,18 @@ LRESULT CALLBACK KeyboardProc(
     );
 }
 
+
+// ------------------------------------------------------------
+// Mouse hook
+// ------------------------------------------------------------
+
 LRESULT CALLBACK MouseProc(
     int code,
     WPARAM wParam,
     LPARAM lParam)
 {
-    if (code >= 0) {
+    if (code >= 0)
+    {
         if (wParam == WM_LBUTTONDOWN ||
             wParam == WM_RBUTTONDOWN ||
             wParam == WM_MBUTTONDOWN ||
@@ -151,35 +216,46 @@ LRESULT CALLBACK MouseProc(
     );
 }
 
+
+// ------------------------------------------------------------
+// Tray menu
+// ------------------------------------------------------------
+
 void ShowTrayMenu()
 {
-    POINT p;
+    POINT p{};
+
     GetCursorPos(&p);
 
-    HMENU menu = CreatePopupMenu();
+    HMENU menu =
+        CreatePopupMenu();
 
-    AppendMenu(
+    if (!menu)
+        return;
+
+    AppendMenuW(
         menu,
-        MF_STRING | (clickable ? MF_CHECKED : 0),
+        MF_STRING |
+        (clickable ? MF_CHECKED : 0),
         ID_CLICKABLE,
         L"Clickable Mode"
     );
 
-    AppendMenu(
+    AppendMenuW(
         menu,
         MF_SEPARATOR,
         0,
         nullptr
     );
 
-    AppendMenu(
+    AppendMenuW(
         menu,
         MF_STRING,
         ID_RESET,
         L"Reset APM"
     );
 
-    AppendMenu(
+    AppendMenuW(
         menu,
         MF_STRING,
         ID_EXIT,
@@ -201,48 +277,73 @@ void ShowTrayMenu()
     DestroyMenu(menu);
 }
 
+
+// ------------------------------------------------------------
+// Tray icon
+// ------------------------------------------------------------
+
 void AddTrayIcon()
 {
-    NOTIFYICONDATA nid{};
+    NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
+
     nid.uFlags =
         NIF_ICON |
         NIF_MESSAGE |
         NIF_TIP;
 
     nid.uCallbackMessage =
-        WM_USER + 1;
+        WM_TRAYICON;
 
     nid.hIcon =
-        LoadIcon(nullptr, IDI_APPLICATION);
+        LoadIconW(
+            nullptr,
+            IDI_APPLICATION
+        );
 
     lstrcpyW(
         nid.szTip,
         L"APM Overlay"
     );
 
-    Shell_NotifyIcon(
+    Shell_NotifyIconW(
         NIM_ADD,
         &nid
     );
 }
 
+
 void RemoveTrayIcon()
 {
-    NOTIFYICONDATA nid{};
+    NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
 
-    Shell_NotifyIcon(
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
+
+    Shell_NotifyIconW(
         NIM_DELETE,
         &nid
     );
 }
+
+
+// ------------------------------------------------------------
+// Window procedure
+// ------------------------------------------------------------
 
 LRESULT CALLBACK WindowProc(
     HWND h,
@@ -252,217 +353,323 @@ LRESULT CALLBACK WindowProc(
 {
     switch (msg)
     {
-    case WM_USER + 1:
+        // ----------------------------------------------------
+        // Tray icon
+        // ----------------------------------------------------
 
-        if (lParam == WM_RBUTTONUP)
-            ShowTrayMenu();
+        case WM_TRAYICON:
 
-        return 0;
+            if (lParam == WM_RBUTTONUP)
+            {
+                ShowTrayMenu();
+            }
 
-    case WM_COMMAND:
+            return 0;
 
-        switch (LOWORD(wParam))
-        {
-        case ID_CLICKABLE:
-            ToggleClickable();
-            break;
 
-        case ID_RESET:
-            ResetAPM();
-            break;
+        // ----------------------------------------------------
+        // Menu commands
+        // ----------------------------------------------------
 
-        case ID_EXIT:
-            DestroyWindow(hwnd);
-            break;
-        }
+        case WM_COMMAND:
 
-        return 0;
+            switch (LOWORD(wParam))
+            {
+                case ID_CLICKABLE:
 
-    case WM_TIMER:
+                    ToggleClickable();
 
-        Advance();
-        InvalidateRect(
-            hwnd,
-            nullptr,
-            FALSE
-        );
+                    break;
 
-        return 0;
 
-    case WM_LBUTTONDOWN:
+                case ID_RESET:
 
-        if (clickable) {
-            ReleaseCapture();
+                    ResetAPM();
 
-            SendMessage(
+                    break;
+
+
+                case ID_EXIT:
+
+                    DestroyWindow(hwnd);
+
+                    break;
+            }
+
+            return 0;
+
+
+        // ----------------------------------------------------
+        // Timer
+        // ----------------------------------------------------
+
+        case WM_TIMER:
+
+            Advance();
+
+            InvalidateRect(
                 hwnd,
-                WM_NCLBUTTONDOWN,
-                HTCAPTION,
-                0
+                nullptr,
+                FALSE
             );
-        }
 
-        return 0;
+            return 0;
 
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
 
-        HDC dc =
-            BeginPaint(
+        // ----------------------------------------------------
+        // TRUE click-through
+        // ----------------------------------------------------
+
+        case WM_NCHITTEST:
+
+            if (!clickable)
+            {
+                return HTTRANSPARENT;
+            }
+
+            return HTCLIENT;
+
+
+        // ----------------------------------------------------
+        // Drag overlay
+        // ----------------------------------------------------
+
+        case WM_LBUTTONDOWN:
+
+            if (clickable)
+            {
+                ReleaseCapture();
+
+                SendMessageW(
+                    hwnd,
+                    WM_NCLBUTTONDOWN,
+                    HTCAPTION,
+                    0
+                );
+            }
+
+            return 0;
+
+
+        // ----------------------------------------------------
+        // Drawing
+        // ----------------------------------------------------
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps{};
+
+            HDC dc =
+                BeginPaint(
+                    hwnd,
+                    &ps
+                );
+
+            RECT r{};
+
+            GetClientRect(
+                hwnd,
+                &r
+            );
+
+
+            // Background
+
+            HBRUSH background =
+                CreateSolidBrush(
+                    RGB(20, 20, 20)
+                );
+
+            FillRect(
+                dc,
+                &r,
+                background
+            );
+
+            DeleteObject(
+                background
+            );
+
+
+            SetBkMode(
+                dc,
+                TRANSPARENT
+            );
+
+            SetTextColor(
+                dc,
+                RGB(255, 255, 255)
+            );
+
+
+            // Font
+
+            HFONT font =
+                CreateFontW(
+                    -22,
+                    0,
+                    0,
+                    0,
+                    FW_BOLD,
+                    FALSE,
+                    FALSE,
+                    FALSE,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH,
+                    L"Segoe UI"
+                );
+
+            HFONT oldFont =
+                reinterpret_cast<HFONT>(
+                    SelectObject(
+                        dc,
+                        font
+                    )
+                );
+
+
+            // APM text
+
+            std::wstring text =
+                L"APM  " +
+                std::to_wstring(total);
+
+            RECT textRect = r;
+
+            textRect.left += 10;
+
+            DrawTextW(
+                dc,
+                text.c_str(),
+                -1,
+                &textRect,
+                DT_LEFT |
+                DT_VCENTER |
+                DT_SINGLELINE
+            );
+
+
+            // Mode box
+
+            RECT mode = r;
+
+            mode.left =
+                r.right - 90;
+
+            mode.right =
+                r.right - 8;
+
+            mode.top =
+                8;
+
+            mode.bottom =
+                r.bottom - 8;
+
+
+            HBRUSH modeBrush =
+                CreateSolidBrush(
+                    clickable
+                    ? RGB(70, 120, 70)
+                    : RGB(55, 55, 55)
+                );
+
+            FillRect(
+                dc,
+                &mode,
+                modeBrush
+            );
+
+            DeleteObject(
+                modeBrush
+            );
+
+
+            std::wstring status =
+                clickable
+                ? L"CLICK"
+                : L"PASS";
+
+            DrawTextW(
+                dc,
+                status.c_str(),
+                -1,
+                &mode,
+                DT_CENTER |
+                DT_VCENTER |
+                DT_SINGLELINE
+            );
+
+
+            SelectObject(
+                dc,
+                oldFont
+            );
+
+            DeleteObject(
+                font
+            );
+
+
+            EndPaint(
                 hwnd,
                 &ps
             );
 
-        RECT r;
-        GetClientRect(hwnd, &r);
+            return 0;
+        }
 
-        HBRUSH background =
-            CreateSolidBrush(
-                RGB(20,20,20)
+
+        // ----------------------------------------------------
+        // Destroy
+        // ----------------------------------------------------
+
+        case WM_DESTROY:
+
+            KillTimer(
+                hwnd,
+                1
             );
 
-        FillRect(
-            dc,
-            &r,
-            background
-        );
+            RemoveTrayIcon();
 
-        DeleteObject(background);
+            if (keyboardHook)
+            {
+                UnhookWindowsHookEx(
+                    keyboardHook
+                );
 
-        SetBkMode(
-            dc,
-            TRANSPARENT
-        );
+                keyboardHook = nullptr;
+            }
 
-        SetTextColor(
-            dc,
-            RGB(255,255,255)
-        );
+            if (mouseHook)
+            {
+                UnhookWindowsHookEx(
+                    mouseHook
+                );
 
-        HFONT font =
-            CreateFontW(
-                -22,
-                0,
-                0,
-                0,
-                FW_BOLD,
-                FALSE,
-                FALSE,
-                FALSE,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                DEFAULT_PITCH,
-                L"Segoe UI"
-            );
+                mouseHook = nullptr;
+            }
 
-        HFONT old =
-            (HFONT)SelectObject(
-                dc,
-                font
-            );
+            PostQuitMessage(0);
 
-        std::wstring text =
-            L"APM  " +
-            std::to_wstring(total);
-
-        RECT textRect = r;
-        textRect.left += 10;
-
-        DrawTextW(
-            dc,
-            text.c_str(),
-            -1,
-            &textRect,
-            DT_LEFT |
-            DT_VCENTER |
-            DT_SINGLELINE
-        );
-
-        RECT mode = r;
-        mode.left = r.right - 90;
-        mode.right = r.right - 8;
-        mode.top = 8;
-        mode.bottom = r.bottom - 8;
-
-        HBRUSH modeBrush =
-            CreateSolidBrush(
-                clickable
-                ? RGB(70,120,70)
-                : RGB(55,55,55)
-            );
-
-        FillRect(
-            dc,
-            &mode,
-            modeBrush
-        );
-
-        DeleteObject(modeBrush);
-
-        std::wstring status =
-            clickable
-            ? L"CLICK"
-            : L"PASS";
-
-        DrawTextW(
-            dc,
-            status.c_str(),
-            -1,
-            &mode,
-            DT_CENTER |
-            DT_VCENTER |
-            DT_SINGLELINE
-        );
-
-        SelectObject(
-            dc,
-            old
-        );
-
-        DeleteObject(font);
-
-        EndPaint(
-            hwnd,
-            &ps
-        );
-
-        return 0;
+            return 0;
     }
 
-    case WM_DESTROY:
-
-        KillTimer(
-            hwnd,
-            1
-        );
-
-        RemoveTrayIcon();
-
-        if (keyboardHook)
-            UnhookWindowsHookEx(
-                keyboardHook
-            );
-
-        if (mouseHook)
-            UnhookWindowsHookEx(
-                mouseHook
-            );
-
-        PostQuitMessage(0);
-
-        return 0;
-    }
-
-    return DefWindowProc(
+    return DefWindowProcW(
         h,
         msg,
         wParam,
         lParam
     );
 }
+
+
+// ------------------------------------------------------------
+// Program entry
+// ------------------------------------------------------------
 
 int WINAPI WinMain(
     HINSTANCE instance,
@@ -482,12 +689,15 @@ int WINAPI WinMain(
         L"APMOverlay";
 
     wc.hCursor =
-        LoadCursor(
+        LoadCursorW(
             nullptr,
             IDC_ARROW
         );
 
-    RegisterClassW(&wc);
+    RegisterClassW(
+        &wc
+    );
+
 
     hwnd =
         CreateWindowExW(
@@ -513,12 +723,20 @@ int WINAPI WinMain(
             nullptr
         );
 
+
+    if (!hwnd)
+        return 1;
+
+
     SetLayeredWindowAttributes(
         hwnd,
         0,
         225,
         LWA_ALPHA
     );
+
+
+    // Start keyboard hook
 
     keyboardHook =
         SetWindowsHookExW(
@@ -528,6 +746,9 @@ int WINAPI WinMain(
             0
         );
 
+
+    // Start mouse hook
+
     mouseHook =
         SetWindowsHookExW(
             WH_MOUSE_LL,
@@ -536,7 +757,33 @@ int WINAPI WinMain(
             0
         );
 
+
+    if (!keyboardHook ||
+        !mouseHook)
+    {
+        MessageBoxW(
+            nullptr,
+            L"Could not install input hooks.",
+            L"APM Overlay",
+            MB_ICONERROR
+        );
+
+        if (keyboardHook)
+            UnhookWindowsHookEx(
+                keyboardHook
+            );
+
+        if (mouseHook)
+            UnhookWindowsHookEx(
+                mouseHook
+            );
+
+        return 1;
+    }
+
+
     AddTrayIcon();
+
 
     SetTimer(
         hwnd,
@@ -545,10 +792,12 @@ int WINAPI WinMain(
         nullptr
     );
 
+
     ShowWindow(
         hwnd,
         SW_SHOWNOACTIVATE
     );
+
 
     MSG msg{};
 
@@ -561,9 +810,15 @@ int WINAPI WinMain(
         )
     )
     {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        TranslateMessage(
+            &msg
+        );
+
+        DispatchMessageW(
+            &msg
+        );
     }
+
 
     return 0;
 }
