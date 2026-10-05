@@ -4,8 +4,9 @@
 
 #include <windows.h>
 #include <shellapi.h>
-#include <array>
+#include <vector>
 #include <string>
+#include <algorithm>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -15,12 +16,11 @@ static HWND hwnd = nullptr;
 static HHOOK keyboardHook = nullptr;
 static HHOOK mouseHook = nullptr;
 
-static std::array<int, 60> buckets{};
-static int bucket = 0;
-static long long total = 0;
-static ULONGLONG lastSecond = 0;
+static std::vector<ULONGLONG> actions;
 
 static bool clickable = false;
+
+static const UINT WM_TRAYICON = WM_USER + 1;
 
 enum
 {
@@ -30,65 +30,71 @@ enum
     ID_EXIT = 103
 };
 
-static const UINT WM_TRAYICON = WM_USER + 1;
-
 
 // ============================================================
-// APM
+// REMOVE ACTIONS OLDER THAN 60 SECONDS
 // ============================================================
 
-void Advance()
+void RemoveOldActions()
 {
-    ULONGLONG now = GetTickCount64() / 1000;
+    ULONGLONG now = GetTickCount64();
 
-    if (!lastSecond)
-    {
-        lastSecond = now;
-        return;
-    }
+    const ULONGLONG window = 60000;
 
-    ULONGLONG diff = now - lastSecond;
+    auto cutoff =
+        now > window
+        ? now - window
+        : 0;
 
-    if (!diff)
-        return;
+    auto it =
+        std::lower_bound(
+            actions.begin(),
+            actions.end(),
+            cutoff
+        );
 
-    if (diff >= 60)
-    {
-        buckets.fill(0);
-        total = 0;
-        bucket = 0;
-    }
-    else
-    {
-        for (ULONGLONG i = 0; i < diff; ++i)
-        {
-            bucket = (bucket + 1) % 60;
-            total -= buckets[bucket];
-            buckets[bucket] = 0;
-        }
-    }
-
-    lastSecond = now;
+    actions.erase(
+        actions.begin(),
+        it
+    );
 }
 
+
+// ============================================================
+// RECORD ACTION
+// ============================================================
 
 void Action()
 {
-    Advance();
+    actions.push_back(
+        GetTickCount64()
+    );
 
-    buckets[bucket]++;
-    total++;
+    RemoveOldActions();
 }
 
 
+// ============================================================
+// CURRENT APM
+// ============================================================
+
+int GetAPM()
+{
+    RemoveOldActions();
+
+    return static_cast<int>(
+        actions.size()
+    );
+}
+
+
+// ============================================================
+// RESET
+// ============================================================
+
 void ResetAPM()
 {
-    buckets.fill(0);
-
-    total = 0;
-    bucket = 0;
-
-    lastSecond = GetTickCount64() / 1000;
+    actions.clear();
 
     InvalidateRect(
         hwnd,
@@ -120,18 +126,15 @@ void SetClickable(bool value)
 
     if (clickable)
     {
-        // Allow interaction
         exStyle &= ~WS_EX_TRANSPARENT;
 
-        // Enable normal resize border
+        // Normal window frame while editing.
         style |= WS_THICKFRAME;
     }
     else
     {
-        // Make mouse pass through
         exStyle |= WS_EX_TRANSPARENT;
 
-        // Remove resize border
         style &= ~WS_THICKFRAME;
     }
 
@@ -191,6 +194,7 @@ LRESULT CALLBACK KeyboardProc(
             KBDLLHOOKSTRUCT* k =
                 reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
+            // Ignore F8/F9.
             if (k->vkCode != VK_F8 &&
                 k->vkCode != VK_F9)
             {
@@ -306,9 +310,14 @@ void AddTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
 
     nid.uFlags =
         NIF_ICON |
@@ -340,9 +349,14 @@ void RemoveTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
 
     Shell_NotifyIconW(
         NIM_DELETE,
@@ -352,7 +366,7 @@ void RemoveTrayIcon()
 
 
 // ============================================================
-// WINDOW
+// WINDOW PROCEDURE
 // ============================================================
 
 LRESULT CALLBACK WindowProc(
@@ -400,12 +414,12 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Real-time update
+        // Update every 5 seconds
         // ----------------------------------------------------
 
         case WM_TIMER:
 
-            Advance();
+            RemoveOldActions();
 
             InvalidateRect(
                 hwnd,
@@ -417,15 +431,13 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Mouse hit testing
+        // Click-through
         // ----------------------------------------------------
 
         case WM_NCHITTEST:
 
             if (!clickable)
-            {
                 return HTTRANSPARENT;
-            }
 
             return DefWindowProcW(
                 h,
@@ -436,7 +448,104 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Painting
+        // Clickable mode:
+        //
+        // Entire window = relocate
+        // Top resize bar = resize
+        // ----------------------------------------------------
+
+        case WM_LBUTTONDOWN:
+
+            if (clickable)
+            {
+                POINT p{};
+
+                GetCursorPos(&p);
+
+                RECT r{};
+
+                GetWindowRect(
+                    hwnd,
+                    &r
+                );
+
+                // Upper 10 pixels = resize area.
+                if (p.y < r.top + 10)
+                {
+                    ReleaseCapture();
+
+                    SendMessageW(
+                        hwnd,
+                        WM_NCLBUTTONDOWN,
+                        HTTOP,
+                        0
+                    );
+                }
+                else
+                {
+                    // Whole remaining window moves.
+                    ReleaseCapture();
+
+                    SendMessageW(
+                        hwnd,
+                        WM_NCLBUTTONDOWN,
+                        HTCAPTION,
+                        0
+                    );
+                }
+
+                return 0;
+            }
+
+            return 0;
+
+
+        // ----------------------------------------------------
+        // Resize cursor
+        // ----------------------------------------------------
+
+        case WM_SETCURSOR:
+
+            if (clickable)
+            {
+                POINT p{};
+
+                GetCursorPos(&p);
+
+                RECT r{};
+
+                GetWindowRect(
+                    hwnd,
+                    &r
+                );
+
+                if (p.y < r.top + 10)
+                {
+                    SetCursor(
+                        LoadCursorW(
+                            nullptr,
+                            IDC_SIZENS
+                        )
+                    );
+
+                    return TRUE;
+                }
+
+                SetCursor(
+                    LoadCursorW(
+                        nullptr,
+                        IDC_SIZEALL
+                    )
+                );
+
+                return TRUE;
+            }
+
+            break;
+
+
+        // ----------------------------------------------------
+        // Paint
         // ----------------------------------------------------
 
         case WM_PAINT:
@@ -459,7 +568,7 @@ LRESULT CALLBACK WindowProc(
 
             // Background
 
-            HBRUSH background =
+            HBRUSH bg =
                 CreateSolidBrush(
                     RGB(20, 20, 20)
                 );
@@ -467,12 +576,10 @@ LRESULT CALLBACK WindowProc(
             FillRect(
                 dc,
                 &r,
-                background
+                bg
             );
 
-            DeleteObject(
-                background
-            );
+            DeleteObject(bg);
 
 
             SetBkMode(
@@ -485,8 +592,6 @@ LRESULT CALLBACK WindowProc(
                 RGB(255, 255, 255)
             );
 
-
-            // Font
 
             HFONT font =
                 CreateFontW(
@@ -506,7 +611,7 @@ LRESULT CALLBACK WindowProc(
                     L"Segoe UI"
                 );
 
-            HFONT oldFont =
+            HFONT old =
                 reinterpret_cast<HFONT>(
                     SelectObject(
                         dc,
@@ -515,11 +620,14 @@ LRESULT CALLBACK WindowProc(
                 );
 
 
-            // APM ONLY
+            // ONLY APM
 
             std::wstring text =
                 L"APM " +
-                std::to_wstring(total);
+                std::to_wstring(
+                    GetAPM()
+                );
+
 
             DrawTextW(
                 dc,
@@ -534,7 +642,7 @@ LRESULT CALLBACK WindowProc(
 
             SelectObject(
                 dc,
-                oldFont
+                old
             );
 
             DeleteObject(
@@ -615,9 +723,7 @@ int WINAPI WinMain(
             IDC_ARROW
         );
 
-    RegisterClassW(
-        &wc
-    );
+    RegisterClassW(&wc);
 
 
     hwnd =
@@ -691,12 +797,12 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
-    // 100 ms = much more responsive display
+    // Check the rolling window every 5 seconds.
 
     SetTimer(
         hwnd,
         1,
-        100,
+        5000,
         nullptr
     );
 
@@ -720,9 +826,10 @@ int WINAPI WinMain(
     {
         TranslateMessage(&msg);
 
-        DispatchMessageW(&msg);
+        DispatchMessageW(
+            &msg
+        );
     }
-
 
     return 0;
 }
