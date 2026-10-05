@@ -38,13 +38,10 @@ enum
 void RemoveOldActions()
 {
     ULONGLONG now = GetTickCount64();
-
     const ULONGLONG window = 60000;
 
-    auto cutoff =
-        now > window
-        ? now - window
-        : 0;
+    ULONGLONG cutoff =
+        (now > window) ? (now - window) : 0;
 
     auto it =
         std::lower_bound(
@@ -66,10 +63,7 @@ void RemoveOldActions()
 
 void Action()
 {
-    actions.push_back(
-        GetTickCount64()
-    );
-
+    actions.push_back(GetTickCount64());
     RemoveOldActions();
 }
 
@@ -127,14 +121,11 @@ void SetClickable(bool value)
     if (clickable)
     {
         exStyle &= ~WS_EX_TRANSPARENT;
-
-        // Normal window frame while editing.
         style |= WS_THICKFRAME;
     }
     else
     {
         exStyle |= WS_EX_TRANSPARENT;
-
         style &= ~WS_THICKFRAME;
     }
 
@@ -186,7 +177,7 @@ LRESULT CALLBACK KeyboardProc(
     WPARAM wParam,
     LPARAM lParam)
 {
-    if (code >= 0)
+    if (code == HC_ACTION)
     {
         if (wParam == WM_KEYDOWN ||
             wParam == WM_SYSKEYDOWN)
@@ -194,7 +185,6 @@ LRESULT CALLBACK KeyboardProc(
             KBDLLHOOKSTRUCT* k =
                 reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-            // Ignore F8/F9.
             if (k->vkCode != VK_F8 &&
                 k->vkCode != VK_F9)
             {
@@ -203,8 +193,9 @@ LRESULT CALLBACK KeyboardProc(
         }
     }
 
+    // Always pass the key through normally.
     return CallNextHookEx(
-        keyboardHook,
+        nullptr,
         code,
         wParam,
         lParam
@@ -221,19 +212,23 @@ LRESULT CALLBACK MouseProc(
     WPARAM wParam,
     LPARAM lParam)
 {
-    if (code >= 0)
+    if (code == HC_ACTION)
     {
-        if (wParam == WM_LBUTTONDOWN ||
-            wParam == WM_RBUTTONDOWN ||
-            wParam == WM_MBUTTONDOWN ||
-            wParam == WM_XBUTTONDOWN)
+        switch (wParam)
         {
-            Action();
+            case WM_LBUTTONDOWN:
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+            case WM_XBUTTONDOWN:
+
+                Action();
+                break;
         }
     }
 
+    // Always pass the mouse event through normally.
     return CallNextHookEx(
-        mouseHook,
+        nullptr,
         code,
         wParam,
         lParam
@@ -310,14 +305,9 @@ void AddTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize =
-        sizeof(nid);
-
-    nid.hWnd =
-        hwnd;
-
-    nid.uID =
-        ID_TRAY;
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY;
 
     nid.uFlags =
         NIF_ICON |
@@ -349,14 +339,9 @@ void RemoveTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize =
-        sizeof(nid);
-
-    nid.hWnd =
-        hwnd;
-
-    nid.uID =
-        ID_TRAY;
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY;
 
     Shell_NotifyIconW(
         NIM_DELETE,
@@ -431,7 +416,7 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Click-through
+        // Click-through / clickable
         // ----------------------------------------------------
 
         case WM_NCHITTEST:
@@ -448,10 +433,10 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Clickable mode:
+        // Clickable mode
         //
-        // Entire window = relocate
-        // Top resize bar = resize
+        // Top 10 pixels = resize
+        // Rest of window = relocate
         // ----------------------------------------------------
 
         case WM_LBUTTONDOWN:
@@ -469,7 +454,6 @@ LRESULT CALLBACK WindowProc(
                     &r
                 );
 
-                // Upper 10 pixels = resize area.
                 if (p.y < r.top + 10)
                 {
                     ReleaseCapture();
@@ -483,7 +467,6 @@ LRESULT CALLBACK WindowProc(
                 }
                 else
                 {
-                    // Whole remaining window moves.
                     ReleaseCapture();
 
                     SendMessageW(
@@ -501,7 +484,7 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Resize cursor
+        // Cursor
         // ----------------------------------------------------
 
         case WM_SETCURSOR:
@@ -565,9 +548,6 @@ LRESULT CALLBACK WindowProc(
                 &r
             );
 
-
-            // Background
-
             HBRUSH bg =
                 CreateSolidBrush(
                     RGB(20, 20, 20)
@@ -581,7 +561,6 @@ LRESULT CALLBACK WindowProc(
 
             DeleteObject(bg);
 
-
             SetBkMode(
                 dc,
                 TRANSPARENT
@@ -591,7 +570,6 @@ LRESULT CALLBACK WindowProc(
                 dc,
                 RGB(255, 255, 255)
             );
-
 
             HFONT font =
                 CreateFontW(
@@ -619,7 +597,6 @@ LRESULT CALLBACK WindowProc(
                     )
                 );
 
-
             // ONLY APM
 
             std::wstring text =
@@ -627,7 +604,6 @@ LRESULT CALLBACK WindowProc(
                 std::to_wstring(
                     GetAPM()
                 );
-
 
             DrawTextW(
                 dc,
@@ -639,16 +615,12 @@ LRESULT CALLBACK WindowProc(
                 DT_SINGLELINE
             );
 
-
             SelectObject(
                 dc,
                 old
             );
 
-            DeleteObject(
-                font
-            );
-
+            DeleteObject(font);
 
             EndPaint(
                 hwnd,
@@ -673,14 +645,22 @@ LRESULT CALLBACK WindowProc(
             RemoveTrayIcon();
 
             if (keyboardHook)
+            {
                 UnhookWindowsHookEx(
                     keyboardHook
                 );
 
+                keyboardHook = nullptr;
+            }
+
             if (mouseHook)
+            {
                 UnhookWindowsHookEx(
                     mouseHook
                 );
+
+                mouseHook = nullptr;
+            }
 
             PostQuitMessage(0);
 
@@ -790,6 +770,16 @@ int WINAPI WinMain(
             MB_ICONERROR
         );
 
+        if (keyboardHook)
+            UnhookWindowsHookEx(
+                keyboardHook
+            );
+
+        if (mouseHook)
+            UnhookWindowsHookEx(
+                mouseHook
+            );
+
         return 1;
     }
 
@@ -797,7 +787,8 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
-    // Check the rolling window every 5 seconds.
+    // Update display every 5 seconds.
+    // APM itself remains a rolling 60-second window.
 
     SetTimer(
         hwnd,
@@ -826,9 +817,7 @@ int WINAPI WinMain(
     {
         TranslateMessage(&msg);
 
-        DispatchMessageW(
-            &msg
-        );
+        DispatchMessageW(&msg);
     }
 
     return 0;
