@@ -1319,13 +1319,13 @@ int WINAPI WinMain(
 
 
     // --------------------------------------------------------
-    // Refresh every 5 seconds
+    // Refresh every 1 second
     // --------------------------------------------------------
 
     SetTimer(
         hwnd,
         1,
-        5000,
+        1000,
         nullptr
     );
 
