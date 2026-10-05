@@ -8,6 +8,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -25,7 +27,11 @@ static bool clickable = false;
 static int overlayWidth = 150;
 static int overlayHeight = 45;
 
+static int overlayX = 20;
+static int overlayY = 20;
+
 static const int MAX_KEY_REPEATS = 5;
+
 static unsigned char keyRepeatCount[256] = {};
 
 static const UINT WM_TRAYICON = WM_USER + 1;
@@ -40,16 +46,148 @@ enum
 
 
 // ============================================================
+// Save / Load window position and size
+// ============================================================
+
+std::wstring GetSaveFilePath()
+{
+    wchar_t exePath[MAX_PATH]{};
+
+    GetModuleFileNameW(
+        nullptr,
+        exePath,
+        MAX_PATH
+    );
+
+    std::wstring path(exePath);
+
+    size_t slash =
+        path.find_last_of(L"\\/");
+
+    if (slash != std::wstring::npos)
+    {
+        path.resize(slash + 1);
+    }
+
+    path += L"APMOverlay.txt";
+
+    return path;
+}
+
+void SaveWindowSettings()
+{
+    if (!hwnd)
+        return;
+
+    RECT r{};
+
+    if (!GetWindowRect(hwnd, &r))
+        return;
+
+    overlayX =
+        r.left;
+
+    overlayY =
+        r.top;
+
+    overlayWidth =
+        r.right - r.left;
+
+    overlayHeight =
+        r.bottom - r.top;
+
+    std::wofstream file(
+        GetSaveFilePath()
+    );
+
+    if (!file.is_open())
+        return;
+
+    file << L"X=" << overlayX << L"\n";
+    file << L"Y=" << overlayY << L"\n";
+    file << L"Width=" << overlayWidth << L"\n";
+    file << L"Height=" << overlayHeight << L"\n";
+}
+
+void LoadWindowSettings()
+{
+    std::wifstream file(
+        GetSaveFilePath()
+    );
+
+    if (!file.is_open())
+        return;
+
+    std::wstring line;
+
+    while (std::getline(file, line))
+    {
+        size_t equals =
+            line.find(L'=');
+
+        if (equals == std::wstring::npos)
+            continue;
+
+        std::wstring key =
+            line.substr(0, equals);
+
+        std::wstring value =
+            line.substr(equals + 1);
+
+        try
+        {
+            int number =
+                std::stoi(value);
+
+            if (key == L"X")
+                overlayX = number;
+
+            else if (key == L"Y")
+                overlayY = number;
+
+            else if (key == L"Width")
+                overlayWidth = number;
+
+            else if (key == L"Height")
+                overlayHeight = number;
+        }
+        catch (...)
+        {
+            // Ignore invalid values
+        }
+    }
+
+    // Safety limits
+    if (overlayWidth < 50)
+        overlayWidth = 50;
+
+    if (overlayHeight < 20)
+        overlayHeight = 20;
+
+    if (overlayWidth > 2000)
+        overlayWidth = 2000;
+
+    if (overlayHeight > 1000)
+        overlayHeight = 1000;
+}
+
+
+// ============================================================
 // APM
 // ============================================================
 
 void RemoveOldActionsLocked()
 {
-    ULONGLONG now = GetTickCount64();
-    const ULONGLONG window = 60000;
+    ULONGLONG now =
+        GetTickCount64();
+
+    const ULONGLONG window =
+        60000;
 
     ULONGLONG cutoff =
-        (now > window) ? now - window : 0;
+        (now > window)
+        ? now - window
+        : 0;
 
     auto it =
         std::lower_bound(
@@ -58,52 +196,79 @@ void RemoveOldActionsLocked()
             cutoff
         );
 
-    actions.erase(actions.begin(), it);
+    actions.erase(
+        actions.begin(),
+        it
+    );
 }
 
 void RemoveOldActions()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     RemoveOldActionsLocked();
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 }
 
 void Action()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
-    actions.push_back(GetTickCount64());
+    actions.push_back(
+        GetTickCount64()
+    );
 
     RemoveOldActionsLocked();
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 }
 
 int GetAPM()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     RemoveOldActionsLocked();
 
     int result =
-        static_cast<int>(actions.size());
+        static_cast<int>(
+            actions.size()
+        );
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
     return result;
 }
 
 void ResetAPM()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     actions.clear();
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
-    InvalidateRect(hwnd, nullptr, FALSE);
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
+    );
 }
 
 
@@ -119,11 +284,15 @@ LRESULT CALLBACK KeyboardProc(
     if (code == HC_ACTION)
     {
         KBDLLHOOKSTRUCT* k =
-            reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+            reinterpret_cast<KBDLLHOOKSTRUCT*>(
+                lParam
+            );
 
-        if (k != nullptr && k->vkCode < 256)
+        if (k != nullptr &&
+            k->vkCode < 256)
         {
-            UINT vk = k->vkCode;
+            UINT vk =
+                k->vkCode;
 
             if (wParam == WM_KEYDOWN ||
                 wParam == WM_SYSKEYDOWN)
@@ -250,9 +419,15 @@ void AddTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
+
     nid.uFlags =
         NIF_ICON |
         NIF_MESSAGE |
@@ -282,9 +457,14 @@ void RemoveTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
 
     Shell_NotifyIconW(
         NIM_DELETE,
@@ -318,7 +498,8 @@ void SetClickable(bool value)
         exStyle &=
             ~WS_EX_TRANSPARENT;
 
-        style |= WS_THICKFRAME;
+        style |=
+            WS_THICKFRAME;
     }
     else
     {
@@ -344,11 +525,10 @@ void SetClickable(bool value)
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
-        0,
-        0,
+        overlayX,
+        overlayY,
         overlayWidth,
         overlayHeight,
-        SWP_NOMOVE |
         SWP_NOACTIVATE |
         SWP_FRAMECHANGED
     );
@@ -369,7 +549,7 @@ void ToggleClickable()
 
 
 // ============================================================
-// Transparent rendering
+// Drawing
 // ============================================================
 
 void DrawOverlay()
@@ -393,8 +573,17 @@ void DrawOverlay()
     if (height < 1)
         height = 1;
 
-    overlayWidth = width;
-    overlayHeight = height;
+    overlayX =
+        wr.left;
+
+    overlayY =
+        wr.top;
+
+    overlayWidth =
+        width;
+
+    overlayHeight =
+        height;
 
     HDC screenDC =
         GetDC(nullptr);
@@ -437,7 +626,8 @@ void DrawOverlay()
     bmi.bmiHeader.biCompression =
         BI_RGB;
 
-    void* bits = nullptr;
+    void* bits =
+        nullptr;
 
     HBITMAP bitmap =
         CreateDIBSection(
@@ -531,7 +721,7 @@ void DrawOverlay()
 
 
     // --------------------------------------------------------
-    // Clickable-mode resize bar
+    // Top resize bar
     // --------------------------------------------------------
 
     if (clickable)
@@ -571,6 +761,7 @@ void DrawOverlay()
     RECT textRect{};
 
     textRect.left = 0;
+
     textRect.top =
         clickable ? 4 : 0;
 
@@ -640,12 +831,15 @@ void DrawOverlay()
 
         if (brightness == 0)
         {
-            pixels[i] = 0x00000000;
+            pixels[i] =
+                0x00000000;
         }
         else
         {
             pixels[i] =
-                (static_cast<DWORD>(brightness) << 24)
+                (static_cast<DWORD>(
+                    brightness
+                ) << 24)
                 |
                 0x00FFFFFF;
         }
@@ -656,7 +850,10 @@ void DrawOverlay()
     // Display
     // --------------------------------------------------------
 
-    POINT source{0, 0};
+    POINT source{
+        0,
+        0
+    };
 
     POINT position{
         wr.left,
@@ -673,7 +870,8 @@ void DrawOverlay()
     blend.BlendOp =
         AC_SRC_OVER;
 
-    blend.BlendFlags = 0;
+    blend.BlendFlags =
+        0;
 
     blend.SourceConstantAlpha =
         255;
@@ -711,7 +909,7 @@ void DrawOverlay()
 
 
 // ============================================================
-// Window
+// Window procedure
 // ============================================================
 
 LRESULT CALLBACK WindowProc(
@@ -724,8 +922,11 @@ LRESULT CALLBACK WindowProc(
     {
         case WM_TRAYICON:
         {
-            if (lParam == WM_RBUTTONUP)
+            if (lParam ==
+                WM_RBUTTONUP)
+            {
                 ShowTrayMenu();
+            }
 
             return 0;
         }
@@ -744,6 +945,7 @@ LRESULT CALLBACK WindowProc(
                     break;
 
                 case ID_EXIT:
+                    SaveWindowSettings();
                     DestroyWindow(hwnd);
                     break;
             }
@@ -794,7 +996,7 @@ LRESULT CALLBACK WindowProc(
             const int grip = 8;
 
 
-            // Top resize edge
+            // Top resize
             if (y < grip)
             {
                 if (x < grip)
@@ -807,7 +1009,7 @@ LRESULT CALLBACK WindowProc(
             }
 
 
-            // Bottom resize edge
+            // Bottom resize
             if (y >= height - grip)
             {
                 if (x < grip)
@@ -820,7 +1022,7 @@ LRESULT CALLBACK WindowProc(
             }
 
 
-            // Left/right resize edges
+            // Left/right resize
             if (x < grip)
                 return HTLEFT;
 
@@ -830,6 +1032,27 @@ LRESULT CALLBACK WindowProc(
 
             // Body moves window
             return HTCAPTION;
+        }
+
+
+        case WM_MOVE:
+        {
+            RECT r{};
+
+            if (GetWindowRect(
+                    hwnd,
+                    &r))
+            {
+                overlayX =
+                    r.left;
+
+                overlayY =
+                    r.top;
+
+                SaveWindowSettings();
+            }
+
+            return 0;
         }
 
 
@@ -853,7 +1076,17 @@ LRESULT CALLBACK WindowProc(
             overlayHeight =
                 newHeight;
 
+            SaveWindowSettings();
+
             DrawOverlay();
+
+            return 0;
+        }
+
+
+        case WM_EXITSIZEMOVE:
+        {
+            SaveWindowSettings();
 
             return 0;
         }
@@ -885,6 +1118,8 @@ LRESULT CALLBACK WindowProc(
 
         case WM_DESTROY:
         {
+            SaveWindowSettings();
+
             KillTimer(
                 hwnd,
                 1
@@ -933,7 +1168,7 @@ LRESULT CALLBACK WindowProc(
 
 
 // ============================================================
-// Main
+// WinMain
 // ============================================================
 
 int WINAPI WinMain(
@@ -945,6 +1180,10 @@ int WINAPI WinMain(
     InitializeCriticalSection(
         &actionLock
     );
+
+
+    // Load previous position/size
+    LoadWindowSettings();
 
 
     // --------------------------------------------------------
@@ -989,8 +1228,8 @@ int WINAPI WinMain(
 
             WS_POPUP,
 
-            20,
-            20,
+            overlayX,
+            overlayY,
 
             overlayWidth,
             overlayHeight,
@@ -1012,7 +1251,7 @@ int WINAPI WinMain(
     }
 
 
-    // Initial transparent rendering
+    // Initial rendering
     DrawOverlay();
 
 
@@ -1046,7 +1285,6 @@ int WINAPI WinMain(
             MB_ICONERROR
         );
 
-
         if (keyboardHook)
         {
             UnhookWindowsHookEx(
@@ -1056,7 +1294,6 @@ int WINAPI WinMain(
             keyboardHook = nullptr;
         }
 
-
         if (mouseHook)
         {
             UnhookWindowsHookEx(
@@ -1065,7 +1302,6 @@ int WINAPI WinMain(
 
             mouseHook = nullptr;
         }
-
 
         DeleteCriticalSection(
             &actionLock
@@ -1095,7 +1331,7 @@ int WINAPI WinMain(
 
 
     // --------------------------------------------------------
-    // Show overlay
+    // Show
     // --------------------------------------------------------
 
     ShowWindow(
@@ -1123,7 +1359,6 @@ int WINAPI WinMain(
 
         DispatchMessageW(&msg);
     }
-
 
     return 0;
 }
