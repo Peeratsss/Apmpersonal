@@ -18,6 +18,9 @@ static HHOOK mouseHook = nullptr;
 
 static std::vector<ULONGLONG> actions;
 
+// Protects the action list from keyboard/mouse hook + timer access.
+static CRITICAL_SECTION actionLock;
+
 static bool clickable = false;
 
 static const UINT WM_TRAYICON = WM_USER + 1;
@@ -37,11 +40,13 @@ enum
 
 void RemoveOldActions()
 {
+    EnterCriticalSection(&actionLock);
+
     ULONGLONG now = GetTickCount64();
     const ULONGLONG window = 60000;
 
     ULONGLONG cutoff =
-        (now > window) ? (now - window) : 0;
+        (now > window) ? now - window : 0;
 
     auto it =
         std::lower_bound(
@@ -54,6 +59,8 @@ void RemoveOldActions()
         actions.begin(),
         it
     );
+
+    LeaveCriticalSection(&actionLock);
 }
 
 
@@ -63,8 +70,29 @@ void RemoveOldActions()
 
 void Action()
 {
+    EnterCriticalSection(&actionLock);
+
     actions.push_back(GetTickCount64());
-    RemoveOldActions();
+
+    ULONGLONG now = GetTickCount64();
+    const ULONGLONG window = 60000;
+
+    ULONGLONG cutoff =
+        (now > window) ? now - window : 0;
+
+    auto it =
+        std::lower_bound(
+            actions.begin(),
+            actions.end(),
+            cutoff
+        );
+
+    actions.erase(
+        actions.begin(),
+        it
+    );
+
+    LeaveCriticalSection(&actionLock);
 }
 
 
@@ -74,11 +102,32 @@ void Action()
 
 int GetAPM()
 {
-    RemoveOldActions();
+    EnterCriticalSection(&actionLock);
 
-    return static_cast<int>(
-        actions.size()
+    ULONGLONG now = GetTickCount64();
+    const ULONGLONG window = 60000;
+
+    ULONGLONG cutoff =
+        (now > window) ? now - window : 0;
+
+    auto it =
+        std::lower_bound(
+            actions.begin(),
+            actions.end(),
+            cutoff
+        );
+
+    actions.erase(
+        actions.begin(),
+        it
     );
+
+    int result =
+        static_cast<int>(actions.size());
+
+    LeaveCriticalSection(&actionLock);
+
+    return result;
 }
 
 
@@ -88,7 +137,11 @@ int GetAPM()
 
 void ResetAPM()
 {
+    EnterCriticalSection(&actionLock);
+
     actions.clear();
+
+    LeaveCriticalSection(&actionLock);
 
     InvalidateRect(
         hwnd,
@@ -185,7 +238,8 @@ LRESULT CALLBACK KeyboardProc(
             KBDLLHOOKSTRUCT* k =
                 reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-            if (k->vkCode != VK_F8 &&
+            if (k != nullptr &&
+                k->vkCode != VK_F8 &&
                 k->vkCode != VK_F9)
             {
                 Action();
@@ -193,7 +247,7 @@ LRESULT CALLBACK KeyboardProc(
         }
     }
 
-    // Always pass the key through normally.
+    // NEVER block the keyboard event.
     return CallNextHookEx(
         nullptr,
         code,
@@ -214,19 +268,16 @@ LRESULT CALLBACK MouseProc(
 {
     if (code == HC_ACTION)
     {
-        switch (wParam)
+        if (wParam == WM_LBUTTONDOWN ||
+            wParam == WM_RBUTTONDOWN ||
+            wParam == WM_MBUTTONDOWN ||
+            wParam == WM_XBUTTONDOWN)
         {
-            case WM_LBUTTONDOWN:
-            case WM_RBUTTONDOWN:
-            case WM_MBUTTONDOWN:
-            case WM_XBUTTONDOWN:
-
-                Action();
-                break;
+            Action();
         }
     }
 
-    // Always pass the mouse event through normally.
+    // NEVER block the mouse event.
     return CallNextHookEx(
         nullptr,
         code,
@@ -362,10 +413,6 @@ LRESULT CALLBACK WindowProc(
 {
     switch (msg)
     {
-        // ----------------------------------------------------
-        // Tray
-        // ----------------------------------------------------
-
         case WM_TRAYICON:
 
             if (lParam == WM_RBUTTONUP)
@@ -373,10 +420,6 @@ LRESULT CALLBACK WindowProc(
 
             return 0;
 
-
-        // ----------------------------------------------------
-        // Menu
-        // ----------------------------------------------------
 
         case WM_COMMAND:
 
@@ -398,10 +441,7 @@ LRESULT CALLBACK WindowProc(
             return 0;
 
 
-        // ----------------------------------------------------
-        // Update every 5 seconds
-        // ----------------------------------------------------
-
+        // Update display every 5 seconds.
         case WM_TIMER:
 
             RemoveOldActions();
@@ -414,10 +454,6 @@ LRESULT CALLBACK WindowProc(
 
             return 0;
 
-
-        // ----------------------------------------------------
-        // Click-through / clickable
-        // ----------------------------------------------------
 
         case WM_NCHITTEST:
 
@@ -432,13 +468,8 @@ LRESULT CALLBACK WindowProc(
             );
 
 
-        // ----------------------------------------------------
-        // Clickable mode
-        //
-        // Top 10 pixels = resize
-        // Rest of window = relocate
-        // ----------------------------------------------------
-
+        // Top 10 pixels = resize.
+        // Rest = move.
         case WM_LBUTTONDOWN:
 
             if (clickable)
@@ -483,10 +514,6 @@ LRESULT CALLBACK WindowProc(
             return 0;
 
 
-        // ----------------------------------------------------
-        // Cursor
-        // ----------------------------------------------------
-
         case WM_SETCURSOR:
 
             if (clickable)
@@ -526,10 +553,6 @@ LRESULT CALLBACK WindowProc(
 
             break;
 
-
-        // ----------------------------------------------------
-        // Paint
-        // ----------------------------------------------------
 
         case WM_PAINT:
         {
@@ -597,8 +620,6 @@ LRESULT CALLBACK WindowProc(
                     )
                 );
 
-            // ONLY APM
-
             std::wstring text =
                 L"APM " +
                 std::to_wstring(
@@ -631,10 +652,6 @@ LRESULT CALLBACK WindowProc(
         }
 
 
-        // ----------------------------------------------------
-        // Destroy
-        // ----------------------------------------------------
-
         case WM_DESTROY:
 
             KillTimer(
@@ -662,6 +679,10 @@ LRESULT CALLBACK WindowProc(
                 mouseHook = nullptr;
             }
 
+            DeleteCriticalSection(
+                &actionLock
+            );
+
             PostQuitMessage(0);
 
             return 0;
@@ -686,6 +707,10 @@ int WINAPI WinMain(
     LPSTR,
     int)
 {
+    InitializeCriticalSection(
+        &actionLock
+    );
+
     WNDCLASSW wc{};
 
     wc.hInstance =
@@ -732,7 +757,13 @@ int WINAPI WinMain(
 
 
     if (!hwnd)
+    {
+        DeleteCriticalSection(
+            &actionLock
+        );
+
         return 1;
+    }
 
 
     SetLayeredWindowAttributes(
@@ -780,6 +811,10 @@ int WINAPI WinMain(
                 mouseHook
             );
 
+        DeleteCriticalSection(
+            &actionLock
+        );
+
         return 1;
     }
 
@@ -787,8 +822,8 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
-    // Update display every 5 seconds.
-    // APM itself remains a rolling 60-second window.
+    // Display update: every 5 seconds.
+    // APM history: rolling 60 seconds.
 
     SetTimer(
         hwnd,
@@ -817,7 +852,9 @@ int WINAPI WinMain(
     {
         TranslateMessage(&msg);
 
-        DispatchMessageW(&msg);
+        DispatchMessageW(
+            &msg
+        );
     }
 
     return 0;
