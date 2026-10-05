@@ -19,6 +19,7 @@ static std::array<int, 60> buckets{};
 static int bucket = 0;
 static long long total = 0;
 static ULONGLONG lastSecond = 0;
+
 static bool clickable = false;
 
 enum
@@ -32,9 +33,9 @@ enum
 static const UINT WM_TRAYICON = WM_USER + 1;
 
 
-// ------------------------------------------------------------
+// ============================================================
 // APM
-// ------------------------------------------------------------
+// ============================================================
 
 void Advance()
 {
@@ -97,32 +98,52 @@ void ResetAPM()
 }
 
 
-// ------------------------------------------------------------
-// Clickable / Pass-through
-// ------------------------------------------------------------
+// ============================================================
+// CLICKABLE MODE
+// ============================================================
 
 void SetClickable(bool value)
 {
     clickable = value;
 
-    LONG_PTR style =
+    LONG_PTR exStyle =
         GetWindowLongPtrW(
             hwnd,
             GWL_EXSTYLE
         );
 
+    LONG_PTR style =
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE
+        );
+
     if (clickable)
     {
-        style &= ~WS_EX_TRANSPARENT;
+        // Allow interaction
+        exStyle &= ~WS_EX_TRANSPARENT;
+
+        // Enable normal resize border
+        style |= WS_THICKFRAME;
     }
     else
     {
-        style |= WS_EX_TRANSPARENT;
+        // Make mouse pass through
+        exStyle |= WS_EX_TRANSPARENT;
+
+        // Remove resize border
+        style &= ~WS_THICKFRAME;
     }
 
     SetWindowLongPtrW(
         hwnd,
         GWL_EXSTYLE,
+        exStyle
+    );
+
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_STYLE,
         style
     );
 
@@ -153,9 +174,9 @@ void ToggleClickable()
 }
 
 
-// ------------------------------------------------------------
-// Keyboard hook
-// ------------------------------------------------------------
+// ============================================================
+// KEYBOARD HOOK
+// ============================================================
 
 LRESULT CALLBACK KeyboardProc(
     int code,
@@ -170,7 +191,6 @@ LRESULT CALLBACK KeyboardProc(
             KBDLLHOOKSTRUCT* k =
                 reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-            // Ignore F8/F9 if ever used as shortcuts.
             if (k->vkCode != VK_F8 &&
                 k->vkCode != VK_F9)
             {
@@ -188,9 +208,9 @@ LRESULT CALLBACK KeyboardProc(
 }
 
 
-// ------------------------------------------------------------
-// Mouse hook
-// ------------------------------------------------------------
+// ============================================================
+// MOUSE HOOK
+// ============================================================
 
 LRESULT CALLBACK MouseProc(
     int code,
@@ -217,9 +237,9 @@ LRESULT CALLBACK MouseProc(
 }
 
 
-// ------------------------------------------------------------
-// Tray menu
-// ------------------------------------------------------------
+// ============================================================
+// TRAY MENU
+// ============================================================
 
 void ShowTrayMenu()
 {
@@ -278,22 +298,17 @@ void ShowTrayMenu()
 }
 
 
-// ------------------------------------------------------------
-// Tray icon
-// ------------------------------------------------------------
+// ============================================================
+// TRAY ICON
+// ============================================================
 
 void AddTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize =
-        sizeof(nid);
-
-    nid.hWnd =
-        hwnd;
-
-    nid.uID =
-        ID_TRAY;
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY;
 
     nid.uFlags =
         NIF_ICON |
@@ -325,14 +340,9 @@ void RemoveTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize =
-        sizeof(nid);
-
-    nid.hWnd =
-        hwnd;
-
-    nid.uID =
-        ID_TRAY;
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY;
 
     Shell_NotifyIconW(
         NIM_DELETE,
@@ -341,9 +351,9 @@ void RemoveTrayIcon()
 }
 
 
-// ------------------------------------------------------------
-// Window procedure
-// ------------------------------------------------------------
+// ============================================================
+// WINDOW
+// ============================================================
 
 LRESULT CALLBACK WindowProc(
     HWND h,
@@ -354,21 +364,19 @@ LRESULT CALLBACK WindowProc(
     switch (msg)
     {
         // ----------------------------------------------------
-        // Tray icon
+        // Tray
         // ----------------------------------------------------
 
         case WM_TRAYICON:
 
             if (lParam == WM_RBUTTONUP)
-            {
                 ShowTrayMenu();
-            }
 
             return 0;
 
 
         // ----------------------------------------------------
-        // Menu commands
+        // Menu
         // ----------------------------------------------------
 
         case WM_COMMAND:
@@ -376,23 +384,15 @@ LRESULT CALLBACK WindowProc(
             switch (LOWORD(wParam))
             {
                 case ID_CLICKABLE:
-
                     ToggleClickable();
-
                     break;
-
 
                 case ID_RESET:
-
                     ResetAPM();
-
                     break;
 
-
                 case ID_EXIT:
-
                     DestroyWindow(hwnd);
-
                     break;
             }
 
@@ -400,7 +400,7 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // Timer
+        // Real-time update
         // ----------------------------------------------------
 
         case WM_TIMER:
@@ -417,7 +417,7 @@ LRESULT CALLBACK WindowProc(
 
 
         // ----------------------------------------------------
-        // TRUE click-through
+        // Mouse hit testing
         // ----------------------------------------------------
 
         case WM_NCHITTEST:
@@ -427,32 +427,16 @@ LRESULT CALLBACK WindowProc(
                 return HTTRANSPARENT;
             }
 
-            return HTCLIENT;
+            return DefWindowProcW(
+                h,
+                msg,
+                wParam,
+                lParam
+            );
 
 
         // ----------------------------------------------------
-        // Drag overlay
-        // ----------------------------------------------------
-
-        case WM_LBUTTONDOWN:
-
-            if (clickable)
-            {
-                ReleaseCapture();
-
-                SendMessageW(
-                    hwnd,
-                    WM_NCLBUTTONDOWN,
-                    HTCAPTION,
-                    0
-                );
-            }
-
-            return 0;
-
-
-        // ----------------------------------------------------
-        // Drawing
+        // Painting
         // ----------------------------------------------------
 
         case WM_PAINT:
@@ -531,72 +515,17 @@ LRESULT CALLBACK WindowProc(
                 );
 
 
-            // APM text
+            // APM ONLY
 
             std::wstring text =
-                L"APM  " +
+                L"APM " +
                 std::to_wstring(total);
-
-            RECT textRect = r;
-
-            textRect.left += 10;
 
             DrawTextW(
                 dc,
                 text.c_str(),
                 -1,
-                &textRect,
-                DT_LEFT |
-                DT_VCENTER |
-                DT_SINGLELINE
-            );
-
-
-            // Mode box
-
-            RECT mode = r;
-
-            mode.left =
-                r.right - 90;
-
-            mode.right =
-                r.right - 8;
-
-            mode.top =
-                8;
-
-            mode.bottom =
-                r.bottom - 8;
-
-
-            HBRUSH modeBrush =
-                CreateSolidBrush(
-                    clickable
-                    ? RGB(70, 120, 70)
-                    : RGB(55, 55, 55)
-                );
-
-            FillRect(
-                dc,
-                &mode,
-                modeBrush
-            );
-
-            DeleteObject(
-                modeBrush
-            );
-
-
-            std::wstring status =
-                clickable
-                ? L"CLICK"
-                : L"PASS";
-
-            DrawTextW(
-                dc,
-                status.c_str(),
-                -1,
-                &mode,
+                &r,
                 DT_CENTER |
                 DT_VCENTER |
                 DT_SINGLELINE
@@ -636,22 +565,14 @@ LRESULT CALLBACK WindowProc(
             RemoveTrayIcon();
 
             if (keyboardHook)
-            {
                 UnhookWindowsHookEx(
                     keyboardHook
                 );
 
-                keyboardHook = nullptr;
-            }
-
             if (mouseHook)
-            {
                 UnhookWindowsHookEx(
                     mouseHook
                 );
-
-                mouseHook = nullptr;
-            }
 
             PostQuitMessage(0);
 
@@ -667,9 +588,9 @@ LRESULT CALLBACK WindowProc(
 }
 
 
-// ------------------------------------------------------------
-// Program entry
-// ------------------------------------------------------------
+// ============================================================
+// MAIN
+// ============================================================
 
 int WINAPI WinMain(
     HINSTANCE instance,
@@ -714,8 +635,8 @@ int WINAPI WinMain(
 
             20,
             20,
-            190,
-            48,
+            150,
+            45,
 
             nullptr,
             nullptr,
@@ -736,8 +657,6 @@ int WINAPI WinMain(
     );
 
 
-    // Start keyboard hook
-
     keyboardHook =
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -745,9 +664,6 @@ int WINAPI WinMain(
             instance,
             0
         );
-
-
-    // Start mouse hook
 
     mouseHook =
         SetWindowsHookExW(
@@ -768,16 +684,6 @@ int WINAPI WinMain(
             MB_ICONERROR
         );
 
-        if (keyboardHook)
-            UnhookWindowsHookEx(
-                keyboardHook
-            );
-
-        if (mouseHook)
-            UnhookWindowsHookEx(
-                mouseHook
-            );
-
         return 1;
     }
 
@@ -785,10 +691,12 @@ int WINAPI WinMain(
     AddTrayIcon();
 
 
+    // 100 ms = much more responsive display
+
     SetTimer(
         hwnd,
         1,
-        250,
+        100,
         nullptr
     );
 
@@ -810,13 +718,9 @@ int WINAPI WinMain(
         )
     )
     {
-        TranslateMessage(
-            &msg
-        );
+        TranslateMessage(&msg);
 
-        DispatchMessageW(
-            &msg
-        );
+        DispatchMessageW(&msg);
     }
 
 
