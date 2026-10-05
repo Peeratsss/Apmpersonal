@@ -3,6 +3,7 @@
 #define _UNICODE
 
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <vector>
 #include <string>
@@ -12,7 +13,13 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 
+
+// ============================================================
+// GLOBALS
+// ============================================================
+
 static HWND hwnd = nullptr;
+
 static HHOOK keyboardHook = nullptr;
 static HHOOK mouseHook = nullptr;
 
@@ -21,12 +28,14 @@ static CRITICAL_SECTION actionLock;
 
 static bool clickable = false;
 
-// Current overlay dimensions.
-// These stay the same when switching between modes.
+// Current overlay size.
+// This is preserved when switching modes.
 static int overlayWidth = 150;
 static int overlayHeight = 45;
 
+// Maximum number of repeated keypresses while a key is held.
 static const int MAX_KEY_REPEATS = 5;
+
 static unsigned char keyRepeatCount[256] = {};
 
 static const UINT WM_TRAYICON = WM_USER + 1;
@@ -41,16 +50,19 @@ enum
 
 
 // ============================================================
-// APM
+// APM TRACKING
 // ============================================================
 
 void RemoveOldActionsLocked()
 {
     ULONGLONG now = GetTickCount64();
+
     const ULONGLONG window = 60000;
 
     ULONGLONG cutoff =
-        (now > window) ? now - window : 0;
+        (now > window)
+        ? now - window
+        : 0;
 
     auto it =
         std::lower_bound(
@@ -69,7 +81,9 @@ void RemoveOldActionsLocked()
 void RemoveOldActions()
 {
     EnterCriticalSection(&actionLock);
+
     RemoveOldActionsLocked();
+
     LeaveCriticalSection(&actionLock);
 }
 
@@ -78,7 +92,9 @@ void Action()
 {
     EnterCriticalSection(&actionLock);
 
-    actions.push_back(GetTickCount64());
+    actions.push_back(
+        GetTickCount64()
+    );
 
     RemoveOldActionsLocked();
 
@@ -93,7 +109,9 @@ int GetAPM()
     RemoveOldActionsLocked();
 
     int result =
-        static_cast<int>(actions.size());
+        static_cast<int>(
+            actions.size()
+        );
 
     LeaveCriticalSection(&actionLock);
 
@@ -109,15 +127,27 @@ void ResetAPM()
 
     LeaveCriticalSection(&actionLock);
 
-    InvalidateRect(hwnd, nullptr, FALSE);
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
+    );
 }
 
 
 // ============================================================
 // KEYBOARD HOOK
 //
-// Every key can repeat up to 5 times while held.
-// Release = reset that key's repeat counter.
+// Each key can count up to 5 times while held.
+//
+// Example:
+//
+// E E E E E E E
+// = 5 actions
+//
+// Release E
+// Press E again
+// = starts at 1 again
 // ============================================================
 
 LRESULT CALLBACK KeyboardProc(
@@ -128,21 +158,30 @@ LRESULT CALLBACK KeyboardProc(
     if (code == HC_ACTION)
     {
         KBDLLHOOKSTRUCT* k =
-            reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+            reinterpret_cast<KBDLLHOOKSTRUCT*>(
+                lParam
+            );
 
-        if (k && k->vkCode < 256)
+        if (k != nullptr &&
+            k->vkCode < 256)
         {
-            UINT vk = k->vkCode;
+            UINT vk =
+                k->vkCode;
 
             if (wParam == WM_KEYDOWN ||
                 wParam == WM_SYSKEYDOWN)
             {
+                // F8/F9 are ignored so they can be
+                // reserved for future controls.
+
                 if (vk != VK_F8 &&
                     vk != VK_F9)
                 {
-                    if (keyRepeatCount[vk] < MAX_KEY_REPEATS)
+                    if (keyRepeatCount[vk] <
+                        MAX_KEY_REPEATS)
                     {
                         keyRepeatCount[vk]++;
+
                         Action();
                     }
                 }
@@ -150,12 +189,16 @@ LRESULT CALLBACK KeyboardProc(
             else if (wParam == WM_KEYUP ||
                      wParam == WM_SYSKEYUP)
             {
+                // Releasing the key resets its
+                // repeat counter.
+
                 keyRepeatCount[vk] = 0;
             }
         }
     }
 
-    // Never block keyboard input.
+    // IMPORTANT:
+    // Never block the actual keyboard input.
     return CallNextHookEx(
         nullptr,
         code,
@@ -195,26 +238,34 @@ LRESULT CALLBACK MouseProc(
 
 
 // ============================================================
-// TRAY
+// TRAY MENU
 // ============================================================
 
 void ShowTrayMenu()
 {
     POINT p{};
+
     GetCursorPos(&p);
 
-    HMENU menu = CreatePopupMenu();
+    HMENU menu =
+        CreatePopupMenu();
 
     if (!menu)
         return;
 
+
+    // Clickable Mode
+
     AppendMenuW(
         menu,
         MF_STRING |
-        (clickable ? MF_CHECKED : 0),
+        (clickable
+            ? MF_CHECKED
+            : 0),
         ID_CLICKABLE,
         L"Clickable Mode"
     );
+
 
     AppendMenuW(
         menu,
@@ -223,12 +274,18 @@ void ShowTrayMenu()
         nullptr
     );
 
+
+    // Reset
+
     AppendMenuW(
         menu,
         MF_STRING,
         ID_RESET,
         L"Reset APM"
     );
+
+
+    // Exit
 
     AppendMenuW(
         menu,
@@ -237,7 +294,9 @@ void ShowTrayMenu()
         L"Exit"
     );
 
+
     SetForegroundWindow(hwnd);
+
 
     TrackPopupMenu(
         menu,
@@ -249,17 +308,27 @@ void ShowTrayMenu()
         nullptr
     );
 
+
     DestroyMenu(menu);
 }
 
+
+// ============================================================
+// TRAY ICON
+// ============================================================
 
 void AddTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
 
     nid.uFlags =
         NIF_ICON |
@@ -291,9 +360,14 @@ void RemoveTrayIcon()
 {
     NOTIFYICONDATAW nid{};
 
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = hwnd;
-    nid.uID = ID_TRAY;
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID =
+        ID_TRAY;
 
     Shell_NotifyIconW(
         NIM_DELETE,
@@ -310,11 +384,13 @@ void SetClickable(bool value)
 {
     clickable = value;
 
+
     LONG_PTR exStyle =
         GetWindowLongPtrW(
             hwnd,
             GWL_EXSTYLE
         );
+
 
     LONG_PTR style =
         GetWindowLongPtrW(
@@ -322,22 +398,32 @@ void SetClickable(bool value)
             GWL_STYLE
         );
 
+
     if (clickable)
     {
-        // Allow interaction.
-        exStyle &= ~WS_EX_TRANSPARENT;
+        // Allow the overlay to receive mouse input.
+
+        exStyle &=
+            ~WS_EX_TRANSPARENT;
 
         // Enable resizing.
-        style |= WS_THICKFRAME;
+
+        style |=
+            WS_THICKFRAME;
     }
     else
     {
-        // Click-through.
-        exStyle |= WS_EX_TRANSPARENT;
+        // Make the overlay click-through.
 
-        // No visible Windows frame.
-        style &= ~WS_THICKFRAME;
+        exStyle |=
+            WS_EX_TRANSPARENT;
+
+        // Remove normal resize frame.
+
+        style &=
+            ~WS_THICKFRAME;
     }
+
 
     SetWindowLongPtrW(
         hwnd,
@@ -345,14 +431,21 @@ void SetClickable(bool value)
         exStyle
     );
 
+
     SetWindowLongPtrW(
         hwnd,
         GWL_STYLE,
         style
     );
 
+
     // IMPORTANT:
-    // Keep exactly the same physical window size.
+    //
+    // Do NOT reset the size here.
+    //
+    // The current width/height are preserved
+    // when switching between modes.
+
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
@@ -365,28 +458,52 @@ void SetClickable(bool value)
         SWP_FRAMECHANGED
     );
 
+
     InvalidateRect(
         hwnd,
         nullptr,
         TRUE
     );
+
+
+    // Redraw immediately.
+
+    UpdateWindow(hwnd);
 }
 
 
 void ToggleClickable()
 {
-    SetClickable(!clickable);
+    SetClickable(
+        !clickable
+    );
 }
 
 
 // ============================================================
-// DRAW TRANSPARENT OVERLAY
+// DRAW OVERLAY
+//
+// Uses a 32-bit ARGB layered window.
+//
+// Pass-through mode:
+//     transparent background
+//
+// Clickable mode:
+//     same size/font, still rendered cleanly
+//
+// No ClearType is used because ClearType does not work
+// correctly on transparent layered backgrounds.
 // ============================================================
 
 void DrawOverlay()
 {
     RECT wr{};
-    GetWindowRect(hwnd, &wr);
+
+    GetWindowRect(
+        hwnd,
+        &wr
+    );
+
 
     int width =
         wr.right - wr.left;
@@ -394,24 +511,54 @@ void DrawOverlay()
     int height =
         wr.bottom - wr.top;
 
+
     if (width < 1)
         width = 1;
 
     if (height < 1)
         height = 1;
 
-    overlayWidth = width;
-    overlayHeight = height;
+
+    // Keep the stored size synchronized.
+
+    overlayWidth =
+        width;
+
+    overlayHeight =
+        height;
 
 
     HDC screenDC =
         GetDC(nullptr);
 
-    HDC memDC =
-        CreateCompatibleDC(screenDC);
 
+    if (!screenDC)
+        return;
+
+
+    HDC memDC =
+        CreateCompatibleDC(
+            screenDC
+        );
+
+
+    if (!memDC)
+    {
+        ReleaseDC(
+            nullptr,
+            screenDC
+        );
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // 32-bit bitmap
+    // --------------------------------------------------------
 
     BITMAPINFO bmi{};
+
     bmi.bmiHeader.biSize =
         sizeof(BITMAPINFOHEADER);
 
@@ -431,7 +578,9 @@ void DrawOverlay()
         BI_RGB;
 
 
-    void* bits = nullptr;
+    void* bits =
+        nullptr;
+
 
     HBITMAP bitmap =
         CreateDIBSection(
@@ -443,32 +592,63 @@ void DrawOverlay()
             0
         );
 
+
+    if (!bitmap)
+    {
+        DeleteDC(memDC);
+
+        ReleaseDC(
+            nullptr,
+            screenDC
+        );
+
+        return;
+    }
+
+
     HBITMAP oldBitmap =
-        (HBITMAP)SelectObject(
-            memDC,
-            bitmap
+        static_cast<HBITMAP>(
+            SelectObject(
+                memDC,
+                bitmap
+            )
         );
 
 
-    // Completely transparent background.
-    ZeroMemory(
-        bits,
+    // --------------------------------------------------------
+    // Completely clear the bitmap.
+    //
+    // This prevents old text from remaining behind and
+    // eliminates text overlap/ghosting.
+    // --------------------------------------------------------
+
+    const size_t byteCount =
         static_cast<size_t>(width) *
         static_cast<size_t>(height) *
-        4
+        4;
+
+
+    ZeroMemory(
+        bits,
+        byteCount
     );
 
 
     // --------------------------------------------------------
-    // Font scales with the actual overlay height.
-    // Same calculation in BOTH modes.
+    // Font size
+    //
+    // IMPORTANT:
+    // Same size calculation regardless of mode.
+    // Switching Pass/Clickable does NOT reset it.
     // --------------------------------------------------------
 
     int fontHeight =
         (height * 62) / 100;
 
+
     if (fontHeight < 8)
         fontHeight = 8;
+
 
     if (fontHeight > 300)
         fontHeight = 300;
@@ -494,20 +674,31 @@ void DrawOverlay()
 
 
     HFONT oldFont =
-        (HFONT)SelectObject(
-            memDC,
-            font
+        static_cast<HFONT>(
+            SelectObject(
+                memDC,
+                font
+            )
         );
 
+
+    // --------------------------------------------------------
+    // Text rendering
+    // --------------------------------------------------------
 
     SetBkMode(
         memDC,
         TRANSPARENT
     );
 
+
     SetTextColor(
         memDC,
-        RGB(255, 255, 255)
+        RGB(
+            255,
+            255,
+            255
+        )
     );
 
 
@@ -518,12 +709,19 @@ void DrawOverlay()
         );
 
 
-    RECT textRect{
-        0,
-        0,
-        width,
-        height
-    };
+    RECT textRect{};
+
+    textRect.left =
+        0;
+
+    textRect.top =
+        0;
+
+    textRect.right =
+        width;
+
+    textRect.bottom =
+        height;
 
 
     DrawTextW(
@@ -538,67 +736,112 @@ void DrawOverlay()
     );
 
 
+    // --------------------------------------------------------
+    // Restore font
+    // --------------------------------------------------------
+
     SelectObject(
         memDC,
         oldFont
     );
 
+
     DeleteObject(font);
 
 
     // --------------------------------------------------------
-    // Make the pixels containing the text opaque.
-    // Transparent background remains transparent.
+    // Convert GDI's RGB text into proper alpha pixels.
+    //
+    // Black = completely transparent
+    //
+    // White/gray antialiasing = corresponding alpha
+    //
+    // This prevents the black/white border that appeared
+    // with color-key transparency.
     // --------------------------------------------------------
 
     DWORD* pixels =
-        static_cast<DWORD*>(bits);
+        static_cast<DWORD*>(
+            bits
+        );
+
 
     const size_t pixelCount =
         static_cast<size_t>(width) *
         static_cast<size_t>(height);
 
-    for (size_t i = 0; i < pixelCount; ++i)
+
+    for (size_t i = 0;
+         i < pixelCount;
+         ++i)
     {
         BYTE blue =
             static_cast<BYTE>(
                 pixels[i] & 0xFF
             );
 
+
         BYTE green =
             static_cast<BYTE>(
                 (pixels[i] >> 8) & 0xFF
             );
+
 
         BYTE red =
             static_cast<BYTE>(
                 (pixels[i] >> 16) & 0xFF
             );
 
+
         BYTE brightness =
             static_cast<BYTE>(
-                (red + green + blue) / 3
+                (
+                    static_cast<int>(red) +
+                    static_cast<int>(green) +
+                    static_cast<int>(blue)
+                ) / 3
             );
 
-        if (brightness > 0)
+
+        if (brightness == 0)
         {
+            // Fully transparent.
+
             pixels[i] =
-                (static_cast<DWORD>(brightness) << 24) |
-                0x00FFFFFF;
+                0x00000000;
         }
         else
         {
-            pixels[i] = 0;
+            // White text with brightness-based alpha.
+
+            pixels[i] =
+                (
+                    static_cast<DWORD>(
+                        brightness
+                    )
+                    << 24
+                )
+                |
+                0x00FFFFFF;
         }
     }
 
 
-    POINT source{0, 0};
+    // --------------------------------------------------------
+    // Update layered window
+    // --------------------------------------------------------
+
+    POINT source{
+        0,
+        0
+    };
+
 
     POINT position{
         wr.left,
         wr.top
     };
+
 
     SIZE size{
         width,
@@ -607,8 +850,12 @@ void DrawOverlay()
 
 
     BLENDFUNCTION blend{};
+
     blend.BlendOp =
         AC_SRC_OVER;
+
+    blend.BlendFlags =
+        0;
 
     blend.SourceConstantAlpha =
         255;
@@ -630,14 +877,24 @@ void DrawOverlay()
     );
 
 
+    // --------------------------------------------------------
+    // Cleanup
+    // --------------------------------------------------------
+
     SelectObject(
         memDC,
         oldBitmap
     );
 
+
     DeleteObject(bitmap);
+
     DeleteDC(memDC);
-    ReleaseDC(nullptr, screenDC);
+
+    ReleaseDC(
+        nullptr,
+        screenDC
+    );
 }
 
 
@@ -653,113 +910,184 @@ LRESULT CALLBACK WindowProc(
 {
     switch (msg)
     {
-        case WM_TRAYICON:
+        // ----------------------------------------------------
+        // Tray icon
+        // ----------------------------------------------------
 
+        case WM_TRAYICON:
+        {
             if (lParam == WM_RBUTTONUP)
+            {
                 ShowTrayMenu();
+            }
 
             return 0;
+        }
 
+
+        // ----------------------------------------------------
+        // Tray menu commands
+        // ----------------------------------------------------
 
         case WM_COMMAND:
-
+        {
             switch (LOWORD(wParam))
             {
                 case ID_CLICKABLE:
+
                     ToggleClickable();
+
                     break;
+
 
                 case ID_RESET:
+
                     ResetAPM();
+
                     break;
 
+
                 case ID_EXIT:
+
                     DestroyWindow(hwnd);
+
                     break;
             }
 
             return 0;
+        }
 
+
+        // ----------------------------------------------------
+        // 5-second display update
+        // ----------------------------------------------------
 
         case WM_TIMER:
-
+        {
             RemoveOldActions();
 
             DrawOverlay();
 
             return 0;
+        }
 
 
         // ----------------------------------------------------
-        // Click-through in pass mode.
+        // Mouse interaction
         // ----------------------------------------------------
 
         case WM_NCHITTEST:
+        {
+            // Pass-through mode:
+            // the overlay does not receive clicks.
 
             if (!clickable)
-                return HTTRANSPARENT;
-
             {
-                POINT p{
-                    GET_X_LPARAM(lParam),
-                    GET_Y_LPARAM(lParam)
-                };
-
-                RECT r{};
-                GetWindowRect(
-                    hwnd,
-                    &r
-                );
-
-                int x =
-                    p.x - r.left;
-
-                int y =
-                    p.y - r.top;
-
-                int width =
-                    r.right - r.left;
-
-                const int grip = 10;
-
-                // Upper bar:
-                // corners resize diagonally,
-                // center resizes vertically.
-
-                if (y < grip)
-                {
-                    if (x < grip)
-                        return HTTOPLEFT;
-
-                    if (x >= width - grip)
-                        return HTTOPRIGHT;
-
-                    return HTTOP;
-                }
-
-                // Whole body relocates.
-                return HTCAPTION;
+                return HTTRANSPARENT;
             }
 
 
-        case WM_SIZE:
+            POINT p{
+                GET_X_LPARAM(lParam),
+                GET_Y_LPARAM(lParam)
+            };
 
-            overlayWidth =
+
+            RECT r{};
+
+            GetWindowRect(
+                hwnd,
+                &r
+            );
+
+
+            int x =
+                p.x - r.left;
+
+            int y =
+                p.y - r.top;
+
+
+            int width =
+                r.right - r.left;
+
+
+            const int grip =
+                10;
+
+
+            // ------------------------------------------------
+            // Top bar
+            //
+            // Top-left  = diagonal resize
+            // Top-right = diagonal resize
+            // Top-center = vertical resize
+            // ------------------------------------------------
+
+            if (y < grip)
+            {
+                if (x < grip)
+                {
+                    return HTTOPLEFT;
+                }
+
+
+                if (x >= width - grip)
+                {
+                    return HTTOPRIGHT;
+                }
+
+
+                return HTTOP;
+            }
+
+
+            // ------------------------------------------------
+            // Everything else moves the overlay.
+            // ------------------------------------------------
+
+            return HTCAPTION;
+        }
+
+
+        // ----------------------------------------------------
+        // Window resizing
+        // ----------------------------------------------------
+
+        case WM_SIZE:
+        {
+            int newWidth =
                 LOWORD(lParam);
 
-            overlayHeight =
+            int newHeight =
                 HIWORD(lParam);
 
-            if (overlayWidth < 50)
-                overlayWidth = 50;
 
-            if (overlayHeight < 20)
-                overlayHeight = 20;
+            if (newWidth < 50)
+                newWidth = 50;
+
+
+            if (newHeight < 20)
+                newHeight = 20;
+
+
+            overlayWidth =
+                newWidth;
+
+
+            overlayHeight =
+                newHeight;
+
 
             DrawOverlay();
 
             return 0;
+        }
 
+
+        // ----------------------------------------------------
+        // Paint
+        // ----------------------------------------------------
 
         case WM_PAINT:
         {
@@ -775,25 +1103,36 @@ LRESULT CALLBACK WindowProc(
                 &ps
             );
 
+
             DrawOverlay();
 
             return 0;
         }
 
 
+        // ----------------------------------------------------
+        // Prevent background erase/flicker
+        // ----------------------------------------------------
+
         case WM_ERASEBKGND:
 
             return 1;
 
 
-        case WM_DESTROY:
+        // ----------------------------------------------------
+        // Cleanup
+        // ----------------------------------------------------
 
+        case WM_DESTROY:
+        {
             KillTimer(
                 hwnd,
                 1
             );
 
+
             RemoveTrayIcon();
+
 
             if (keyboardHook)
             {
@@ -801,8 +1140,10 @@ LRESULT CALLBACK WindowProc(
                     keyboardHook
                 );
 
-                keyboardHook = nullptr;
+                keyboardHook =
+                    nullptr;
             }
+
 
             if (mouseHook)
             {
@@ -810,17 +1151,22 @@ LRESULT CALLBACK WindowProc(
                     mouseHook
                 );
 
-                mouseHook = nullptr;
+                mouseHook =
+                    nullptr;
             }
+
 
             DeleteCriticalSection(
                 &actionLock
             );
 
+
             PostQuitMessage(0);
 
             return 0;
+        }
     }
+
 
     return DefWindowProcW(
         h,
@@ -832,7 +1178,7 @@ LRESULT CALLBACK WindowProc(
 
 
 // ============================================================
-// MAIN
+// PROGRAM ENTRY
 // ============================================================
 
 int WINAPI WinMain(
@@ -841,16 +1187,21 @@ int WINAPI WinMain(
     LPSTR,
     int)
 {
+    // --------------------------------------------------------
+    // Initialize synchronization
+    // --------------------------------------------------------
+
     InitializeCriticalSection(
         &actionLock
     );
 
 
     // --------------------------------------------------------
-    // Load Radiance Sans
+    // Locate Radiance_Sans.ttf beside the EXE
     // --------------------------------------------------------
 
     wchar_t exePath[MAX_PATH]{};
+
 
     GetModuleFileNameW(
         nullptr,
@@ -858,14 +1209,17 @@ int WINAPI WinMain(
         MAX_PATH
     );
 
+
     std::wstring fontPath(
         exePath
     );
+
 
     size_t slash =
         fontPath.find_last_of(
             L"\\/"
         );
+
 
     if (slash != std::wstring::npos)
     {
@@ -874,9 +1228,12 @@ int WINAPI WinMain(
         );
     }
 
+
     fontPath +=
         L"Radiance_Sans.ttf";
 
+
+    // Load font privately for this process.
 
     AddFontResourceExW(
         fontPath.c_str(),
@@ -891,14 +1248,22 @@ int WINAPI WinMain(
 
     WNDCLASSW wc{};
 
+
+    wc.style =
+        0;
+
+
     wc.hInstance =
         instance;
+
 
     wc.lpfnWndProc =
         WindowProc;
 
+
     wc.lpszClassName =
         L"APMOverlay";
+
 
     wc.hCursor =
         LoadCursorW(
@@ -906,13 +1271,14 @@ int WINAPI WinMain(
             IDC_ARROW
         );
 
+
     RegisterClassW(
         &wc
     );
 
 
     // --------------------------------------------------------
-    // Create overlay
+    // Create overlay window
     // --------------------------------------------------------
 
     hwnd =
@@ -924,18 +1290,22 @@ int WINAPI WinMain(
             WS_EX_NOACTIVATE,
 
             L"APMOverlay",
+
             L"APM",
 
             WS_POPUP,
 
             20,
             20,
+
             overlayWidth,
             overlayHeight,
 
             nullptr,
             nullptr,
+
             instance,
+
             nullptr
         );
 
@@ -948,20 +1318,25 @@ int WINAPI WinMain(
             nullptr
         );
 
+
         DeleteCriticalSection(
             &actionLock
         );
+
 
         return 1;
     }
 
 
-    // Initial transparent rendering.
+    // --------------------------------------------------------
+    // Initial rendering
+    // --------------------------------------------------------
+
     DrawOverlay();
 
 
     // --------------------------------------------------------
-    // Hooks
+    // Install keyboard hook
     // --------------------------------------------------------
 
     keyboardHook =
@@ -971,6 +1346,11 @@ int WINAPI WinMain(
             instance,
             0
         );
+
+
+    // --------------------------------------------------------
+    // Install mouse hook
+    // --------------------------------------------------------
 
     mouseHook =
         SetWindowsHookExW(
@@ -991,15 +1371,28 @@ int WINAPI WinMain(
             MB_ICONERROR
         );
 
+
         if (keyboardHook)
+        {
             UnhookWindowsHookEx(
                 keyboardHook
             );
 
+            keyboardHook =
+                nullptr;
+        }
+
+
         if (mouseHook)
+        {
             UnhookWindowsHookEx(
                 mouseHook
             );
+
+            mouseHook =
+                nullptr;
+        }
+
 
         RemoveFontResourceExW(
             fontPath.c_str(),
@@ -1007,19 +1400,27 @@ int WINAPI WinMain(
             nullptr
         );
 
+
         DeleteCriticalSection(
             &actionLock
         );
+
 
         return 1;
     }
 
 
+    // --------------------------------------------------------
+    // Tray
+    // --------------------------------------------------------
+
     AddTrayIcon();
 
 
     // --------------------------------------------------------
-    // Update every 5 seconds
+    // Update display every 5 seconds
+    //
+    // APM itself is still a rolling 60-second window.
     // --------------------------------------------------------
 
     SetTimer(
@@ -1030,13 +1431,22 @@ int WINAPI WinMain(
     );
 
 
+    // --------------------------------------------------------
+    // Show overlay
+    // --------------------------------------------------------
+
     ShowWindow(
         hwnd,
         SW_SHOWNOACTIVATE
     );
 
 
+    // --------------------------------------------------------
+    // Message loop
+    // --------------------------------------------------------
+
     MSG msg{};
+
 
     while (
         GetMessageW(
@@ -1051,17 +1461,23 @@ int WINAPI WinMain(
             &msg
         );
 
+
         DispatchMessageW(
             &msg
         );
     }
 
 
+    // --------------------------------------------------------
+    // Remove font
+    // --------------------------------------------------------
+
     RemoveFontResourceExW(
         fontPath.c_str(),
         FR_PRIVATE,
         nullptr
     );
+
 
     return 0;
 }
