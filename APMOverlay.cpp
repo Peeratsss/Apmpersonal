@@ -16,10 +16,6 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 
-// ============================================================
-// GLOBALS
-// ============================================================
-
 static HWND hwnd = nullptr;
 
 static HHOOK keyboardHook = nullptr;
@@ -33,14 +29,11 @@ static int overlayWidth = 150;
 static int overlayHeight = 45;
 
 static const int TOP_BAR_HEIGHT = 6;
-
-// 2x supersampling for smoother text.
 static const int RENDER_SCALE = 2;
 
 static CRITICAL_SECTION actionLock;
 
 static std::vector<ULONGLONG> actions;
-
 static ULONGLONG lastActionTime = 0;
 
 static BYTE keyRepeatCount[256] = { 0 };
@@ -57,8 +50,11 @@ struct InputStat
 
 static std::vector<InputStat> inputStats;
 
+// Every individual button press in chronological order.
+static std::vector<std::wstring> inputTimeline;
+
 // ============================================================
-// PATHS
+// FILE PATHS
 // ============================================================
 
 std::wstring GetExeDirectory()
@@ -79,7 +75,10 @@ std::wstring GetExeDirectory()
     if (pos == std::wstring::npos)
         return L".";
 
-    return fullPath.substr(0, pos);
+    return fullPath.substr(
+        0,
+        pos
+    );
 }
 
 std::wstring GetSettingsPath()
@@ -92,6 +91,51 @@ std::wstring GetInputStatsPath()
 {
     return GetExeDirectory() +
            L"\\Inputs.txt";
+}
+
+// ============================================================
+// UTF-8
+// ============================================================
+
+std::string WideToUTF8(
+    const std::wstring& text
+)
+{
+    if (text.empty())
+        return "";
+
+    int sizeNeeded =
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            text.c_str(),
+            -1,
+            nullptr,
+            0,
+            nullptr,
+            nullptr
+        );
+
+    if (sizeNeeded <= 1)
+        return "";
+
+    std::string result(
+        sizeNeeded - 1,
+        '\0'
+    );
+
+    WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text.c_str(),
+        -1,
+        &result[0],
+        sizeNeeded,
+        nullptr,
+        nullptr
+    );
+
+    return result;
 }
 
 // ============================================================
@@ -134,10 +178,15 @@ void LoadSettings()
             continue;
 
         std::string key =
-            line.substr(0, equal);
+            line.substr(
+                0,
+                equal
+            );
 
         std::string value =
-            line.substr(equal + 1);
+            line.substr(
+                equal + 1
+            );
 
         try
         {
@@ -169,7 +218,7 @@ void LoadSettings()
 }
 
 // ============================================================
-// INPUT STATISTICS
+// SAVE INPUT HISTORY
 // ============================================================
 
 void SaveInputStats()
@@ -182,80 +231,122 @@ void SaveInputStats()
     if (!file)
         return;
 
+    // --------------------------------------------------------
+    // BUTTON PRESS COUNTS
+    // --------------------------------------------------------
+
+    file << "=== BUTTON PRESS COUNTS ===\n\n";
+
     for (const auto& stat : inputStats)
     {
-        int sizeNeeded =
-            WideCharToMultiByte(
-                CP_UTF8,
-                0,
-                stat.name.c_str(),
-                -1,
-                nullptr,
-                0,
-                nullptr,
-                nullptr
-            );
-
-        if (sizeNeeded <= 0)
-            continue;
-
-        std::string utf8(
-            sizeNeeded - 1,
-            '\0'
-        );
-
-        WideCharToMultiByte(
-            CP_UTF8,
-            0,
-            stat.name.c_str(),
-            -1,
-            &utf8[0],
-            sizeNeeded,
-            nullptr,
-            nullptr
-        );
-
         file
-            << utf8
+            << WideToUTF8(stat.name)
             << " = "
             << stat.count
             << "\n";
     }
+
+    // --------------------------------------------------------
+    // INPUT TIMELINE
+    // --------------------------------------------------------
+
+    file << "\n\n";
+    file << "=== INPUT TIMELINE ===\n\n";
+
+    for (const auto& input : inputTimeline)
+    {
+        file
+            << WideToUTF8(input)
+            << "\n";
+    }
 }
+
+// ============================================================
+// RECORD INPUT
+// ============================================================
 
 void RecordInputLocked(
     const std::wstring& inputName
 )
 {
+    // Update button count.
+    bool found = false;
+
     for (auto& stat : inputStats)
     {
         if (stat.name == inputName)
         {
             stat.count++;
-
-            SaveInputStats();
-
-            return;
+            found = true;
+            break;
         }
     }
 
-    InputStat newStat;
+    // First appearance gets its own entry.
+    if (!found)
+    {
+        InputStat newStat;
 
-    newStat.name =
-        inputName;
+        newStat.name = inputName;
+        newStat.count = 1;
 
-    newStat.count =
-        1;
+        inputStats.push_back(
+            newStat
+        );
+    }
 
-    inputStats.push_back(
-        newStat
+    // Record the actual individual press.
+    inputTimeline.push_back(
+        inputName
     );
 
+    // Save immediately.
     SaveInputStats();
 }
 
 // ============================================================
-// APM CLEANUP
+// RESET APM + INPUT HISTORY
+// ============================================================
+
+void ResetEverything()
+{
+    EnterCriticalSection(
+        &actionLock
+    );
+
+    // Reset rolling APM.
+    actions.clear();
+
+    lastActionTime = 0;
+
+    // Reset button press counts.
+    inputStats.clear();
+
+    // Reset chronological input timeline.
+    inputTimeline.clear();
+
+    // Reset held-key repeat tracking.
+    ZeroMemory(
+        keyRepeatCount,
+        sizeof(keyRepeatCount)
+    );
+
+    LeaveCriticalSection(
+        &actionLock
+    );
+
+    // Immediately clear Inputs.txt.
+    SaveInputStats();
+
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
+    );
+}
+
+// ============================================================
+// APM HISTORY
 // ============================================================
 
 void RemoveOldActionsLocked()
@@ -266,8 +357,8 @@ void RemoveOldActionsLocked()
     const ULONGLONG window =
         60000ULL;
 
-    // If no input happened for 60 seconds,
-    // APM must be zero.
+    // Force APM to zero after
+    // 60 seconds with no input.
     if (
         lastActionTime != 0 &&
         now >= lastActionTime &&
@@ -306,7 +397,7 @@ void RemoveOldActionsLocked()
 }
 
 // ============================================================
-// RECORD ACTION
+// ACTION
 // ============================================================
 
 void Action(
@@ -360,31 +451,6 @@ int GetAPM()
     );
 
     return result;
-}
-
-// ============================================================
-// RESET APM
-// ============================================================
-
-void ResetAPM()
-{
-    EnterCriticalSection(
-        &actionLock
-    );
-
-    actions.clear();
-
-    lastActionTime = 0;
-
-    LeaveCriticalSection(
-        &actionLock
-    );
-
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        FALSE
-    );
 }
 
 // ============================================================
@@ -689,6 +755,7 @@ LRESULT CALLBACK KeyboardHookProc(
             DWORD vk =
                 kb->vkCode;
 
+            // F8/F9 are ignored.
             if (
                 vk != VK_F8 &&
                 vk != VK_F9 &&
@@ -700,6 +767,7 @@ LRESULT CALLBACK KeyboardHookProc(
                     wParam == WM_SYSKEYDOWN
                 )
                 {
+                    // Maximum 5 presses while held.
                     if (
                         keyRepeatCount[vk] < 5
                     )
@@ -785,7 +853,7 @@ LRESULT CALLBACK MouseHookProc(
                 case WM_RBUTTONDOWN:
                 case WM_MBUTTONDOWN:
                 case WM_XBUTTONDOWN:
-                {
+
                     Action(
                         GetMouseButtonName(
                             wParam
@@ -793,7 +861,6 @@ LRESULT CALLBACK MouseHookProc(
                     );
 
                     break;
-                }
 
                 default:
                     break;
@@ -810,7 +877,7 @@ LRESULT CALLBACK MouseHookProc(
 }
 
 // ============================================================
-// STYLED TEXT
+// TEXT DRAWING
 // ============================================================
 
 void DrawStyledText(
@@ -820,9 +887,6 @@ void DrawStyledText(
     int scale
 )
 {
-    const int outline =
-        2 * scale;
-
     const int shadow =
         2 * scale;
 
@@ -836,7 +900,10 @@ void DrawStyledText(
         TRANSPARENT
     );
 
+    // --------------------------------------------------------
     // Shadow
+    // --------------------------------------------------------
+
     SetTextColor(
         dc,
         RGB(0, 0, 0)
@@ -845,10 +912,17 @@ void DrawStyledText(
     RECT shadowRect =
         rect;
 
-    shadowRect.left += shadow;
-    shadowRect.top += shadow;
-    shadowRect.right += shadow;
-    shadowRect.bottom += shadow;
+    shadowRect.left +=
+        shadow;
+
+    shadowRect.top +=
+        shadow;
+
+    shadowRect.right +=
+        shadow;
+
+    shadowRect.bottom +=
+        shadow;
 
     DrawTextW(
         dc,
@@ -861,7 +935,10 @@ void DrawStyledText(
         DT_NOPREFIX
     );
 
-    // Dark outline
+    // --------------------------------------------------------
+    // Outline
+    // --------------------------------------------------------
+
     SetTextColor(
         dc,
         RGB(25, 25, 25)
@@ -911,7 +988,10 @@ void DrawStyledText(
         );
     }
 
+    // --------------------------------------------------------
     // Main text
+    // --------------------------------------------------------
+
     SetTextColor(
         dc,
         RGB(255, 255, 255)
@@ -977,10 +1057,6 @@ void DrawOverlay()
         return;
     }
 
-    // ========================================================
-    // HIGH-RES RENDER SIZE
-    // ========================================================
-
     const int renderWidth =
         overlayWidth *
         RENDER_SCALE;
@@ -1002,10 +1078,6 @@ void DrawOverlay()
             screenDC
         );
 
-    // ========================================================
-    // HIGH-RES BITMAP
-    // ========================================================
-
     BITMAPINFO renderInfo = {};
 
     renderInfo.bmiHeader.biSize =
@@ -1026,8 +1098,7 @@ void DrawOverlay()
     renderInfo.bmiHeader.biCompression =
         BI_RGB;
 
-    void* renderBits =
-        nullptr;
+    void* renderBits = nullptr;
 
     HBITMAP renderBitmap =
         CreateDIBSection(
@@ -1043,7 +1114,12 @@ void DrawOverlay()
     {
         DeleteDC(renderDC);
         DeleteDC(finalDC);
-        ReleaseDC(nullptr, screenDC);
+
+        ReleaseDC(
+            nullptr,
+            screenDC
+        );
+
         return;
     }
 
@@ -1052,10 +1128,6 @@ void DrawOverlay()
             renderDC,
             renderBitmap
         );
-
-    // ========================================================
-    // FINAL-SIZE BITMAP
-    // ========================================================
 
     BITMAPINFO finalInfo = {};
 
@@ -1077,8 +1149,7 @@ void DrawOverlay()
     finalInfo.bmiHeader.biCompression =
         BI_RGB;
 
-    void* finalBits =
-        nullptr;
+    void* finalBits = nullptr;
 
     HBITMAP finalBitmap =
         CreateDIBSection(
@@ -1103,7 +1174,11 @@ void DrawOverlay()
 
         DeleteDC(renderDC);
         DeleteDC(finalDC);
-        ReleaseDC(nullptr, screenDC);
+
+        ReleaseDC(
+            nullptr,
+            screenDC
+        );
 
         return;
     }
@@ -1114,9 +1189,9 @@ void DrawOverlay()
             finalBitmap
         );
 
-    // ========================================================
-    // CLEAR HIGH-RES BITMAP
-    // ========================================================
+    // --------------------------------------------------------
+    // CLEAR
+    // --------------------------------------------------------
 
     RECT renderRect =
     {
@@ -1134,9 +1209,9 @@ void DrawOverlay()
         )
     );
 
-    // ========================================================
-    // CLICKABLE TOP BAR
-    // ========================================================
+    // --------------------------------------------------------
+    // CLICKABLE MODE TOP BAR
+    // --------------------------------------------------------
 
     if (clickableMode)
     {
@@ -1165,9 +1240,9 @@ void DrawOverlay()
         );
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // FONT
-    // ========================================================
+    // --------------------------------------------------------
 
     int fontHeight =
         max(
@@ -1202,10 +1277,6 @@ void DrawOverlay()
             font
         );
 
-    // ========================================================
-    // APM TEXT
-    // ========================================================
-
     std::wstring text =
         L"APM " +
         std::to_wstring(
@@ -1228,9 +1299,9 @@ void DrawOverlay()
         RENDER_SCALE
     );
 
-    // ========================================================
+    // --------------------------------------------------------
     // DOWNSAMPLE
-    // ========================================================
+    // --------------------------------------------------------
 
     DWORD* sourcePixels =
         static_cast<DWORD*>(
@@ -1271,11 +1342,13 @@ void DrawOverlay()
                 )
                 {
                     int sourceX =
-                        x * RENDER_SCALE +
+                        x *
+                        RENDER_SCALE +
                         sx;
 
                     int sourceY =
-                        y * RENDER_SCALE +
+                        y *
+                        RENDER_SCALE +
                         sy;
 
                     DWORD pixel =
@@ -1286,13 +1359,16 @@ void DrawOverlay()
                         ];
 
                     redTotal +=
-                        (pixel >> 16) & 0xFF;
+                        (pixel >> 16) &
+                        0xFF;
 
                     greenTotal +=
-                        (pixel >> 8) & 0xFF;
+                        (pixel >> 8) &
+                        0xFF;
 
                     blueTotal +=
-                        pixel & 0xFF;
+                        pixel &
+                        0xFF;
                 }
             }
 
@@ -1330,35 +1406,36 @@ void DrawOverlay()
             if (brightness == 0)
             {
                 destinationPixels[
-                    y * overlayWidth + x
+                    y *
+                    overlayWidth +
+                    x
                 ] = 0;
             }
             else
             {
-                // Use brightness as alpha while
-                // preserving the rendered RGB.
                 destinationPixels[
-                    y * overlayWidth + x
+                    y *
+                    overlayWidth +
+                    x
                 ] =
                     (static_cast<DWORD>(
                         brightness
                     ) << 24) |
+
                     (static_cast<DWORD>(
                         red
                     ) << 16) |
+
                     (static_cast<DWORD>(
                         green
                     ) << 8) |
+
                     static_cast<DWORD>(
                         blue
                     );
             }
         }
     }
-
-    // ========================================================
-    // UPDATE LAYERED WINDOW
-    // ========================================================
 
     POINT destination =
     {
@@ -1401,18 +1478,12 @@ void DrawOverlay()
         ULW_ALPHA
     );
 
-    // ========================================================
-    // CLEANUP
-    // ========================================================
-
     SelectObject(
         renderDC,
         oldFont
     );
 
-    DeleteObject(
-        font
-    );
+    DeleteObject(font);
 
     SelectObject(
         renderDC,
@@ -1432,13 +1503,8 @@ void DrawOverlay()
         finalBitmap
     );
 
-    DeleteDC(
-        renderDC
-    );
-
-    DeleteDC(
-        finalDC
-    );
+    DeleteDC(renderDC);
+    DeleteDC(finalDC);
 
     ReleaseDC(
         nullptr,
@@ -1557,6 +1623,8 @@ void ShowTrayMenu()
             : L"Clickable Mode"
     );
 
+    // This is the ONLY reset control.
+    // It resets APM + input counts + timeline.
     AppendMenuW(
         menu,
         MF_STRING,
@@ -1613,9 +1681,7 @@ LRESULT CALLBACK WindowProc(
         case WM_TIMER:
         {
             if (wParam == 1)
-            {
                 DrawOverlay();
-            }
 
             return 0;
         }
@@ -1699,9 +1765,7 @@ LRESULT CALLBACK WindowProc(
         case WM_NCHITTEST:
         {
             if (!clickableMode)
-            {
                 return HTTRANSPARENT;
-            }
 
             POINT pt =
             {
@@ -1792,32 +1856,34 @@ LRESULT CALLBACK WindowProc(
 
         case WM_COMMAND:
         {
-            switch (LOWORD(wParam))
+            switch (
+                LOWORD(wParam)
+            )
             {
                 case ID_TRAY_CLICK:
-                {
+
                     SetClickableMode(
                         !clickableMode
                     );
 
                     return 0;
-                }
 
                 case ID_TRAY_RESET:
-                {
-                    ResetAPM();
+
+                    // Reset APM,
+                    // counts,
+                    // and timeline.
+                    ResetEverything();
 
                     return 0;
-                }
 
                 case ID_TRAY_EXIT:
-                {
+
                     DestroyWindow(
                         window
                     );
 
                     return 0;
-                }
             }
 
             break;
@@ -1983,7 +2049,7 @@ int WINAPI WinMain(
     );
 
     // ========================================================
-    // INPUT HOOKS
+    // HOOKS
     // ========================================================
 
     keyboardHook =
@@ -2003,7 +2069,7 @@ int WINAPI WinMain(
         );
 
     // ========================================================
-    // START IN PASS-THROUGH MODE
+    // PASS-THROUGH MODE
     // ========================================================
 
     SetClickableMode(
@@ -2011,7 +2077,7 @@ int WINAPI WinMain(
     );
 
     // ========================================================
-    // REFRESH EVERY SECOND
+    // REFRESH
     // ========================================================
 
     SetTimer(
