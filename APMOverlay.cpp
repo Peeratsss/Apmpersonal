@@ -84,11 +84,8 @@ void SaveWindowSettings()
     if (!GetWindowRect(hwnd, &r))
         return;
 
-    overlayX =
-        r.left;
-
-    overlayY =
-        r.top;
+    overlayX = r.left;
+    overlayY = r.top;
 
     overlayWidth =
         r.right - r.left;
@@ -153,11 +150,9 @@ void LoadWindowSettings()
         }
         catch (...)
         {
-            // Ignore invalid values
         }
     }
 
-    // Safety limits
     if (overlayWidth < 50)
         overlayWidth = 50;
 
@@ -549,6 +544,134 @@ void ToggleClickable()
 
 
 // ============================================================
+// Styled text drawing
+// ============================================================
+
+void DrawStyledText(
+    HDC dc,
+    const std::wstring& text,
+    RECT rect)
+{
+    const int outline = 2;
+    const int shadow = 2;
+
+    // --------------------------------------------------------
+    // Slight character spacing
+    // --------------------------------------------------------
+
+    SetTextCharacterExtra(
+        dc,
+        1
+    );
+
+    SetBkMode(
+        dc,
+        TRANSPARENT
+    );
+
+
+    // --------------------------------------------------------
+    // Dark drop shadow
+    // --------------------------------------------------------
+
+    SetTextColor(
+        dc,
+        RGB(0, 0, 0)
+    );
+
+    RECT shadowRect = rect;
+
+    shadowRect.left += shadow;
+    shadowRect.top += shadow;
+    shadowRect.right += shadow;
+    shadowRect.bottom += shadow;
+
+    DrawTextW(
+        dc,
+        text.c_str(),
+        -1,
+        &shadowRect,
+        DT_CENTER |
+        DT_VCENTER |
+        DT_SINGLELINE |
+        DT_NOPREFIX
+    );
+
+
+    // --------------------------------------------------------
+    // Dark outline
+    // --------------------------------------------------------
+
+    SetTextColor(
+        dc,
+        RGB(25, 25, 25)
+    );
+
+    const int offsets[][2] =
+    {
+        {-outline, -outline},
+        { 0,       -outline},
+        { outline, -outline},
+
+        {-outline,  0},
+        { outline,  0},
+
+        {-outline,  outline},
+        { 0,        outline},
+        { outline,  outline}
+    };
+
+    for (const auto& offset : offsets)
+    {
+        RECT outlineRect = rect;
+
+        outlineRect.left += offset[0];
+        outlineRect.top += offset[1];
+
+        outlineRect.right += offset[0];
+        outlineRect.bottom += offset[1];
+
+        DrawTextW(
+            dc,
+            text.c_str(),
+            -1,
+            &outlineRect,
+            DT_CENTER |
+            DT_VCENTER |
+            DT_SINGLELINE |
+            DT_NOPREFIX
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // Main white text
+    // --------------------------------------------------------
+
+    SetTextColor(
+        dc,
+        RGB(245, 245, 245)
+    );
+
+    DrawTextW(
+        dc,
+        text.c_str(),
+        -1,
+        &rect,
+        DT_CENTER |
+        DT_VCENTER |
+        DT_SINGLELINE |
+        DT_NOPREFIX
+    );
+
+    SetTextCharacterExtra(
+        dc,
+        0
+    );
+}
+
+
+// ============================================================
 // Drawing
 // ============================================================
 
@@ -709,16 +832,6 @@ void DrawOverlay()
             )
         );
 
-    SetBkMode(
-        memDC,
-        TRANSPARENT
-    );
-
-    SetTextColor(
-        memDC,
-        RGB(255, 255, 255)
-    );
-
 
     // --------------------------------------------------------
     // Top resize bar
@@ -771,20 +884,16 @@ void DrawOverlay()
     textRect.bottom =
         height;
 
-    DrawTextW(
+
+    DrawStyledText(
         memDC,
-        text.c_str(),
-        -1,
-        &textRect,
-        DT_CENTER |
-        DT_VCENTER |
-        DT_SINGLELINE |
-        DT_NOPREFIX
+        text,
+        textRect
     );
 
 
     // --------------------------------------------------------
-    // Convert white pixels to alpha
+    // Convert rendered pixels to alpha
     // --------------------------------------------------------
 
     SelectObject(
@@ -836,12 +945,13 @@ void DrawOverlay()
         }
         else
         {
+            // Keep the original rendered color.
+            // Give visible pixels full alpha.
             pixels[i] =
-                (static_cast<DWORD>(
-                    brightness
-                ) << 24)
-                |
-                0x00FFFFFF;
+                (0xFFu << 24) |
+                (static_cast<DWORD>(red) << 16) |
+                (static_cast<DWORD>(green) << 8) |
+                static_cast<DWORD>(blue);
         }
     }
 
@@ -996,7 +1106,6 @@ LRESULT CALLBACK WindowProc(
             const int grip = 8;
 
 
-            // Top resize
             if (y < grip)
             {
                 if (x < grip)
@@ -1009,7 +1118,6 @@ LRESULT CALLBACK WindowProc(
             }
 
 
-            // Bottom resize
             if (y >= height - grip)
             {
                 if (x < grip)
@@ -1022,7 +1130,6 @@ LRESULT CALLBACK WindowProc(
             }
 
 
-            // Left/right resize
             if (x < grip)
                 return HTLEFT;
 
@@ -1030,7 +1137,6 @@ LRESULT CALLBACK WindowProc(
                 return HTRIGHT;
 
 
-            // Body moves window
             return HTCAPTION;
         }
 
@@ -1181,8 +1287,6 @@ int WINAPI WinMain(
         &actionLock
     );
 
-
-    // Load previous position/size
     LoadWindowSettings();
 
 
@@ -1251,7 +1355,6 @@ int WINAPI WinMain(
     }
 
 
-    // Initial rendering
     DrawOverlay();
 
 
