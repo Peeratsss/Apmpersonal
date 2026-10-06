@@ -1,31 +1,45 @@
-name: Build APM Overlay
+name: Build APM Tools
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       - name: Build APM Overlay
         shell: cmd
         run: |
           cl /nologo /O2 /EHsc APMOverlay.cpp user32.lib gdi32.lib shell32.lib /link /SUBSYSTEM:WINDOWS /OUT:APMOverlay.exe
 
-      - name: Upload EXE
+      - name: Build APM Timeline Visualizer
+        shell: cmd
+        run: |
+          cl /nologo /O2 /EHsc APMTimelineVisualizer.cpp user32.lib gdi32.lib comdlg32.lib mfplat.lib mfreadwrite.lib mfuuid.lib /link /SUBSYSTEM:WINDOWS /OUT:APMTimelineVisualizer.exe
+
+      - name: Upload APM Overlay
         uses: actions/upload-artifact@v4
         with:
           name: APMOverlay
           path: APMOverlay.exe
+
+      - name: Upload APM Timeline Visualizer
+        uses: actions/upload-artifact@v4
+        with:
+          name: APMTimelineVisualizer
+          path: APMTimelineVisualizer.exe
+
+      - name: Upload Both EXEs
+        uses: actions/upload-artifact@v4
+        with:
+          name: APM-Tools
+          path: |
+            APMOverlay.exe
+            APMTimelineVisualizer.exe
