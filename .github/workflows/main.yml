@@ -1,6 +1,9 @@
 name: Build APM Tools
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -8,7 +11,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup MSVC
@@ -22,24 +25,24 @@ jobs:
       - name: Build APM Timeline Visualizer
         shell: cmd
         run: |
-          cl /nologo /O2 /EHsc APMTimelineVisualizer.cpp user32.lib gdi32.lib comdlg32.lib mfplat.lib mfreadwrite.lib mfuuid.lib /link /SUBSYSTEM:WINDOWS /OUT:APMTimelineVisualizer.exe
+          cl /nologo /O2 /EHsc APMTimelineVisualizer.cpp user32.lib gdi32.lib mfplat.lib mfreadwrite.lib mfuuid.lib /link /SUBSYSTEM:WINDOWS /OUT:APMTimelineVisualizer.exe
 
-      - name: Upload APM Overlay
-        uses: actions/upload-artifact@v4
-        with:
-          name: APMOverlay
-          path: APMOverlay.exe
+      - name: Create APM Tools ZIP
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path APM-Tools | Out-Null
 
-      - name: Upload APM Timeline Visualizer
-        uses: actions/upload-artifact@v4
-        with:
-          name: APMTimelineVisualizer
-          path: APMTimelineVisualizer.exe
+          Copy-Item APMOverlay.exe APM-Tools\APMOverlay.exe
+          Copy-Item APMTimelineVisualizer.exe APM-Tools\APMTimelineVisualizer.exe
 
-      - name: Upload Both EXEs
+          Compress-Archive `
+            -Path APM-Tools\* `
+            -DestinationPath APM-Tools.zip `
+            -Force
+
+      - name: Upload APM Tools ZIP
         uses: actions/upload-artifact@v4
         with:
           name: APM-Tools
-          path: |
-            APMOverlay.exe
-            APMTimelineVisualizer.exe
+          path: APM-Tools.zip
+          if-no-files-found: error
