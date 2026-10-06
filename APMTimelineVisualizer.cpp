@@ -9,841 +9,510 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#include <mftransform.h>
+#include <mfuuid.h>
 
-#include <vector>
 #include <string>
-#include <sstream>
+#include <vector>
 #include <algorithm>
-#include <map>
-#include <cmath>
+#include <sstream>
 #include <cwctype>
+#include <cmath>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "mfuuid.lib")
-
+#pragma comment(lib, "ole32.lib")
 
 // ============================================================
-// VIDEO SETTINGS
+// SETTINGS
 // ============================================================
 
-static const int VIDEO_WIDTH  = 1920;
+static const int VIDEO_WIDTH = 1920;
 static const int VIDEO_HEIGHT = 1080;
-static const int VIDEO_FPS    = 60;
 
-static const double FLASH_TIME = 0.12;
-static const double TAIL_TIME  = 0.50;
+static const int FPS = 60;
 
+static const int DEFAULT_WIDTH = 1100;
+static const int DEFAULT_HEIGHT = 850;
+
+static const UINT TIMER_PREVIEW = 1;
 
 // ============================================================
-// UI IDS
+// EVENT
 // ============================================================
 
-static const int ID_EDIT =
-    1001;
-
-static const int ID_LOAD =
-    1002;
-
-static const int ID_PLAY =
-    1003;
-
-static const int ID_RESET =
-    1004;
-
-static const int ID_EXPORT =
-    1005;
-
-static const UINT WM_EXPORT_DONE =
-    WM_APP + 50;
-
+struct TimelineEvent
+{
+    double time = 0.0;
+    std::wstring name;
+    bool down = true;
+};
 
 // ============================================================
 // GLOBALS
 // ============================================================
 
-static HWND hwnd = nullptr;
-static HWND timelineEdit = nullptr;
-static HWND statusText = nullptr;
-static HWND playButton = nullptr;
+static HWND hwndMain = nullptr;
+static HWND hwndTimeline = nullptr;
 
-static bool playing = false;
-static bool exporting = false;
+static HWND hwndLoad = nullptr;
+static HWND hwndPlay = nullptr;
+static HWND hwndReset = nullptr;
+static HWND hwndExport = nullptr;
 
-static HANDLE exportThread = nullptr;
+static std::vector<TimelineEvent> events;
+
+static std::vector<std::wstring> heldKeys;
+
+static size_t processedEventIndex = 0;
 
 static double currentTime = 0.0;
 static double duration = 0.0;
 
-static size_t nextEvent = 0;
+static bool playing = false;
 
-static std::wstring outputPath;
-
-
-// ============================================================
-// EVENTS
-// ============================================================
-
-struct InputEvent
-{
-    double time;
-    std::wstring name;
-    bool release;
-};
-
-static std::vector<InputEvent> events;
-
-
-// ============================================================
-// BUTTON STATE
-// ============================================================
-
-struct ButtonState
-{
-    bool down = false;
-    double lastPress = -1000.0;
-};
-
-static std::map<std::wstring, ButtonState>
-    buttonStates;
-
-
-// ============================================================
-// APM ACTION TIMES
-// ============================================================
-
-static std::vector<double>
-    actionTimes;
-
+static LARGE_INTEGER performanceFrequency{};
+static LARGE_INTEGER lastPerformanceTime{};
 
 // ============================================================
 // STRING HELPERS
 // ============================================================
 
-std::wstring Trim(
-    const std::wstring& text
+static std::wstring Trim(
+    const std::wstring& input
 )
 {
     size_t first = 0;
 
     while (
-        first < text.size() &&
-        iswspace(text[first])
+        first < input.size() &&
+        iswspace(input[first])
     )
     {
-        first++;
+        ++first;
     }
 
-    size_t last =
-        text.size();
+    size_t last = input.size();
 
     while (
         last > first &&
-        iswspace(text[last - 1])
+        iswspace(input[last - 1])
     )
     {
-        last--;
+        --last;
     }
 
-    return text.substr(
+    return input.substr(
         first,
         last - first
     );
 }
 
-
-bool IsAM(
-    const std::wstring& s
+static std::wstring ToUpper(
+    std::wstring value
 )
 {
-    return
-        s == L"AM" ||
-        s == L"am" ||
-        s == L"Am" ||
-        s == L"aM";
+    for (wchar_t& c : value)
+        c = towupper(c);
+
+    return value;
 }
 
-
-bool IsPM(
-    const std::wstring& s
+static bool EndsWith(
+    const std::wstring& value,
+    const std::wstring& ending
 )
 {
-    return
-        s == L"PM" ||
-        s == L"pm" ||
-        s == L"Pm" ||
-        s == L"pM";
+    if (value.size() < ending.size())
+        return false;
+
+    return value.compare(
+        value.size() - ending.size(),
+        ending.size(),
+        ending
+    ) == 0;
 }
 
-
 // ============================================================
-// TIMESTAMP PARSING
+// TIMESTAMP PARSER
 // ============================================================
 
-bool ParseColonTimestamp(
-    const std::wstring& timestamp,
-    const std::wstring& ampm,
-    double& result
+static bool ParseTimestamp(
+    const std::wstring& text,
+    double& seconds
 )
 {
+    std::wstring s = Trim(text);
+
+    // Expected:
+    // 10:46:46.533 PM
+    //
+    // Also accepts:
+    // 10 46 46.533 PM
+
+    for (wchar_t& c : s)
+    {
+        if (c == ':')
+            c = L' ';
+    }
+
+    std::wstringstream ss(s);
+
     int hour = 0;
     int minute = 0;
     double second = 0.0;
-
-    if (
-        swscanf_s(
-            timestamp.c_str(),
-            L"%d:%d:%lf",
-            &hour,
-            &minute,
-            &second
-        ) != 3
-    )
-    {
-        return false;
-    }
-
-    if (
-        hour < 1 ||
-        hour > 12 ||
-        minute < 0 ||
-        minute > 59 ||
-        second < 0.0 ||
-        second >= 60.0
-    )
-    {
-        return false;
-    }
-
-    if (hour == 12)
-        hour = 0;
-
-    if (IsPM(ampm))
-        hour += 12;
-
-    result =
-        hour * 3600.0 +
-        minute * 60.0 +
-        second;
-
-    return true;
-}
-
-
-bool ParseSpaceTimestamp(
-    const std::wstring& hourText,
-    const std::wstring& minuteText,
-    const std::wstring& secondText,
-    const std::wstring& ampm,
-    double& result
-)
-{
-    int hour =
-        _wtoi(
-            hourText.c_str()
-        );
-
-    int minute =
-        _wtoi(
-            minuteText.c_str()
-        );
-
-    double second =
-        _wtof(
-            secondText.c_str()
-        );
-
-    if (
-        hour < 1 ||
-        hour > 12 ||
-        minute < 0 ||
-        minute > 59 ||
-        second < 0.0 ||
-        second >= 60.0
-    )
-    {
-        return false;
-    }
-
-    if (hour == 12)
-        hour = 0;
-
-    if (IsPM(ampm))
-        hour += 12;
-
-    result =
-        hour * 3600.0 +
-        minute * 60.0 +
-        second;
-
-    return true;
-}
-
-
-// ============================================================
-// PARSE ONE LINE
-// ============================================================
-
-bool ParseLine(
-    const std::wstring& source,
-    InputEvent& result
-)
-{
-    std::wstring line =
-        Trim(source);
-
-    if (line.empty())
-        return false;
-
-    if (line[0] == L'#')
-        return false;
-
-    if (
-        line.find(L"===") == 0
-    )
-    {
-        return false;
-    }
-
-    // --------------------------------------------------------
-    // FORMAT:
-    //
-    // 10:46:46.533 PM    1
-    // --------------------------------------------------------
-
-    size_t firstSpace =
-        line.find_first_of(
-            L" \t"
-        );
-
-    if (
-        firstSpace !=
-        std::wstring::npos
-    )
-    {
-        std::wstring timestamp =
-            line.substr(
-                0,
-                firstSpace
-            );
-
-        std::wstring remainder =
-            Trim(
-                line.substr(
-                    firstSpace
-                )
-            );
-
-        size_t secondSpace =
-            remainder.find_first_of(
-                L" \t"
-            );
-
-        if (
-            secondSpace !=
-            std::wstring::npos
-        )
-        {
-            std::wstring ampm =
-                remainder.substr(
-                    0,
-                    secondSpace
-                );
-
-            std::wstring name =
-                Trim(
-                    remainder.substr(
-                        secondSpace
-                    )
-                );
-
-            double time = 0.0;
-
-            if (
-                (IsAM(ampm) ||
-                 IsPM(ampm)) &&
-                ParseColonTimestamp(
-                    timestamp,
-                    ampm,
-                    time
-                )
-            )
-            {
-                if (name.empty())
-                    return false;
-
-                bool release = false;
-
-                if (
-                    name.size() >= 3 &&
-                    name.compare(
-                        name.size() - 3,
-                        3,
-                        L"_UP"
-                    ) == 0
-                )
-                {
-                    release = true;
-
-                    name =
-                        name.substr(
-                            0,
-                            name.size() - 3
-                        );
-                }
-
-                if (name.empty())
-                    return false;
-
-                result.time =
-                    time;
-
-                result.name =
-                    name;
-
-                result.release =
-                    release;
-
-                return true;
-            }
-        }
-    }
-
-    // --------------------------------------------------------
-    // FORMAT:
-    //
-    // 10 46 46.533 PM    1
-    // --------------------------------------------------------
-
-    std::wstringstream ss(
-        line
-    );
-
-    std::wstring hour;
-    std::wstring minute;
-    std::wstring second;
     std::wstring ampm;
 
-    if (
-        !(ss >>
-          hour >>
-          minute >>
-          second >>
-          ampm)
-    )
+    if (!(ss >> hour >> minute >> second >> ampm))
+        return false;
+
+    ampm = ToUpper(ampm);
+
+    if (ampm != L"AM" &&
+        ampm != L"PM")
     {
         return false;
     }
 
-    std::wstring name;
-
-    std::getline(
-        ss,
-        name
-    );
-
-    name =
-        Trim(
-            name
-        );
-
-    if (name.empty())
+    if (hour < 1 || hour > 12)
         return false;
 
-    double time = 0.0;
+    if (minute < 0 || minute > 59)
+        return false;
 
-    if (
-        !ParseSpaceTimestamp(
-            hour,
-            minute,
-            second,
-            ampm,
-            time
-        )
-    )
+    if (second < 0.0 || second >= 60.0)
+        return false;
+
+    if (ampm == L"AM")
     {
-        return false;
+        if (hour == 12)
+            hour = 0;
+    }
+    else
+    {
+        if (hour != 12)
+            hour += 12;
     }
 
-    bool release = false;
-
-    if (
-        name.size() >= 3 &&
-        name.compare(
-            name.size() - 3,
-            3,
-            L"_UP"
-        ) == 0
-    )
-    {
-        release = true;
-
-        name =
-            name.substr(
-                0,
-                name.size() - 3
-            );
-    }
-
-    if (name.empty())
-        return false;
-
-    result.time =
-        time;
-
-    result.name =
-        name;
-
-    result.release =
-        release;
+    seconds =
+        static_cast<double>(hour) * 3600.0 +
+        static_cast<double>(minute) * 60.0 +
+        second;
 
     return true;
 }
 
-
 // ============================================================
-// READ EDIT CONTROL
+// TIMELINE PARSER
 // ============================================================
 
-std::wstring GetEditText()
+static bool ParseTimeline(
+    const std::wstring& text
+)
 {
-    int length =
-        GetWindowTextLengthW(
-            timelineEdit
-        );
+    std::vector<TimelineEvent> parsed;
 
-    if (length <= 0)
-        return L"";
-
-    std::wstring text(
-        length,
-        L'\0'
-    );
-
-    GetWindowTextW(
-        timelineEdit,
-        &text[0],
-        length + 1
-    );
-
-    return text;
-}
-
-
-// ============================================================
-// LOAD TIMELINE
-// ============================================================
-
-bool LoadTimeline()
-{
-    std::wstring text =
-        GetEditText();
-
-    if (text.empty())
-    {
-        SetWindowTextW(
-            statusText,
-            L"No timeline text was entered."
-        );
-
-        return false;
-    }
-
-    std::vector<InputEvent>
-        parsed;
-
-    std::wstringstream ss(
-        text
-    );
-
+    std::wstringstream stream(text);
     std::wstring line;
 
-    while (
-        std::getline(
-            ss,
-            line
-        )
-    )
+    double previousClock = -1.0;
+    double dayOffset = 0.0;
+
+    while (std::getline(stream, line))
     {
-        if (
-            !line.empty() &&
-            line.back() == L'\r'
-        )
+        line = Trim(line);
+
+        if (line.empty())
+            continue;
+
+        if (line[0] == L'#')
+            continue;
+
+        std::wstring timestampText;
+        std::wstring inputName;
+
+        size_t tab =
+            line.find(L'\t');
+
+        if (tab != std::wstring::npos)
         {
-            line.pop_back();
+            timestampText =
+                Trim(line.substr(0, tab));
+
+            inputName =
+                Trim(line.substr(tab + 1));
+        }
+        else
+        {
+            // Find AM/PM and use everything before it
+            // as timestamp and everything after as input.
+            std::wstring upper =
+                ToUpper(line);
+
+            size_t amPos =
+                upper.find(L" AM");
+
+            size_t pmPos =
+                upper.find(L" PM");
+
+            size_t pos = std::wstring::npos;
+
+            if (amPos != std::wstring::npos)
+                pos = amPos;
+
+            if (pmPos != std::wstring::npos &&
+                (pos == std::wstring::npos ||
+                 pmPos < pos))
+            {
+                pos = pmPos;
+            }
+
+            if (pos == std::wstring::npos)
+                continue;
+
+            size_t timestampEnd = pos + 3;
+
+            timestampText =
+                Trim(line.substr(
+                    0,
+                    timestampEnd
+                ));
+
+            inputName =
+                Trim(line.substr(
+                    timestampEnd
+                ));
         }
 
-        InputEvent event;
-
-        if (
-            ParseLine(
-                line,
-                event
-            )
-        )
+        if (timestampText.empty() ||
+            inputName.empty())
         {
-            parsed.push_back(
-                event
+            continue;
+        }
+
+        double clockSeconds = 0.0;
+
+        if (!ParseTimestamp(
+                timestampText,
+                clockSeconds))
+        {
+            continue;
+        }
+
+        // Handle midnight rollover.
+        if (previousClock >= 0.0 &&
+            clockSeconds < previousClock)
+        {
+            dayOffset += 86400.0;
+        }
+
+        previousClock = clockSeconds;
+
+        TimelineEvent event;
+
+        event.time =
+            clockSeconds + dayOffset;
+
+        event.name = inputName;
+
+        if (EndsWith(
+                event.name,
+                L"_UP"))
+        {
+            event.down = false;
+
+            event.name.resize(
+                event.name.size() - 3
             );
+
+            event.name =
+                Trim(event.name);
         }
+        else
+        {
+            event.down = true;
+        }
+
+        parsed.push_back(event);
     }
 
     if (parsed.empty())
-    {
-        SetWindowTextW(
-            statusText,
-            L"No valid timeline events found."
-        );
-
         return false;
-    }
-
-    // --------------------------------------------------------
-    // Convert clock timestamps into elapsed timestamps.
-    //
-    // Handles midnight crossing.
-    // --------------------------------------------------------
-
-    double previous =
-        parsed[0].time;
-
-    double dayOffset = 0.0;
-
-    for (
-        size_t i = 0;
-        i < parsed.size();
-        ++i
-    )
-    {
-        double raw =
-            parsed[i].time;
-
-        if (
-            i > 0 &&
-            raw < previous
-        )
-        {
-            dayOffset +=
-                24.0 * 60.0 * 60.0;
-        }
-
-        parsed[i].time =
-            raw +
-            dayOffset;
-
-        previous =
-            raw;
-    }
 
     double firstTime =
         parsed.front().time;
 
-    for (
-        InputEvent& event :
-        parsed
-    )
+    for (TimelineEvent& event : parsed)
     {
-        event.time -=
-            firstTime;
+        event.time -= firstTime;
+
+        if (event.time < 0.0)
+            event.time = 0.0;
     }
 
     std::stable_sort(
         parsed.begin(),
         parsed.end(),
-        [](const InputEvent& a,
-           const InputEvent& b)
+        [](const TimelineEvent& a,
+           const TimelineEvent& b)
         {
             return a.time < b.time;
         }
     );
 
-    events =
-        parsed;
+    events = parsed;
 
     duration =
-        events.back().time;
+        events.back().time + 0.5;
 
-    buttonStates.clear();
-
-    actionTimes.clear();
-
-    nextEvent = 0;
+    if (duration < 0.5)
+        duration = 0.5;
 
     currentTime = 0.0;
-
-    playing = false;
-
-    SetWindowTextW(
-        playButton,
-        L"Play"
-    );
-
-    wchar_t status[256];
-
-    swprintf_s(
-        status,
-        L"Loaded %zu events | Duration %.3f seconds",
-        events.size(),
-        duration
-    );
-
-    SetWindowTextW(
-        statusText,
-        status
-    );
-
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        FALSE
-    );
+    processedEventIndex = 0;
+    heldKeys.clear();
 
     return true;
 }
 
-
 // ============================================================
-// RESET SIMULATION
+// EDIT CONTROL
 // ============================================================
 
-void ResetSimulation()
+static std::wstring GetEditText(
+    HWND edit
+)
 {
-    currentTime = 0.0;
+    int length =
+        GetWindowTextLengthW(edit);
 
-    nextEvent = 0;
+    if (length <= 0)
+        return L"";
 
-    buttonStates.clear();
-
-    actionTimes.clear();
-
-    playing = false;
-
-    SetWindowTextW(
-        playButton,
-        L"Play"
+    std::wstring text(
+        static_cast<size_t>(length) + 1,
+        L'\0'
     );
 
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        FALSE
+    GetWindowTextW(
+        edit,
+        &text[0],
+        length + 1
     );
+
+    text.resize(
+        static_cast<size_t>(length)
+    );
+
+    return text;
 }
 
+// ============================================================
+// HELD STATE
+// ============================================================
+
+static bool IsHeld(
+    const std::wstring& name
+)
+{
+    return std::find(
+        heldKeys.begin(),
+        heldKeys.end(),
+        name
+    ) != heldKeys.end();
+}
+
+static void SetHeld(
+    const std::wstring& name,
+    bool held
+)
+{
+    auto it =
+        std::find(
+            heldKeys.begin(),
+            heldKeys.end(),
+            name
+        );
+
+    if (held)
+    {
+        if (it == heldKeys.end())
+            heldKeys.push_back(name);
+    }
+    else
+    {
+        if (it != heldKeys.end())
+            heldKeys.erase(it);
+    }
+}
 
 // ============================================================
 // PROCESS EVENTS
 // ============================================================
 
-void ProcessEventsTo(
+static void ResetPlaybackState()
+{
+    heldKeys.clear();
+    processedEventIndex = 0;
+}
+
+static void ProcessEventsTo(
     double targetTime
 )
 {
     while (
-        nextEvent < events.size() &&
-        events[nextEvent].time <= targetTime
+        processedEventIndex < events.size() &&
+        events[processedEventIndex].time <= targetTime
     )
     {
-        const InputEvent& event =
-            events[nextEvent];
+        const TimelineEvent& event =
+            events[processedEventIndex];
 
-        ButtonState& state =
-            buttonStates[
-                event.name
-            ];
+        SetHeld(
+            event.name,
+            event.down
+        );
 
-        if (event.release)
-        {
-            state.down = false;
-        }
-        else
-        {
-            state.down = true;
-
-            state.lastPress =
-                event.time;
-
-            actionTimes.push_back(
-                event.time
-            );
-        }
-
-        nextEvent++;
+        ++processedEventIndex;
     }
 }
-
 
 // ============================================================
 // APM
 // ============================================================
 
-int GetAPMAtTime(
+static int CalculateAPM(
     double time
 )
 {
-    double cutoff =
+    double start =
         time - 60.0;
 
     int count = 0;
 
-    for (
-        auto it =
-            actionTimes.rbegin();
-        it != actionTimes.rend();
-        ++it
-    )
+    for (const TimelineEvent& event : events)
     {
-        if (*it < cutoff)
+        if (!event.down)
+            continue;
+
+        if (event.time > time)
             break;
 
-        if (*it <= time)
-            count++;
+        if (event.time >= start)
+            ++count;
     }
 
     return count;
 }
 
-
-// ============================================================
-// BUTTON ACTIVE STATE
-// ============================================================
-
-bool IsButtonPressed(
-    const std::wstring& name
-)
-{
-    auto it =
-        buttonStates.find(
-            name
-        );
-
-    if (
-        it == buttonStates.end()
-    )
-    {
-        return false;
-    }
-
-    const ButtonState& state =
-        it->second;
-
-    if (state.down)
-        return true;
-
-    return
-        currentTime -
-        state.lastPress <
-        FLASH_TIME;
-}
-
-
 // ============================================================
 // DRAW HELPERS
 // ============================================================
 
-void FillRectColor(
+static void FillRectColor(
     HDC hdc,
     int left,
     int top,
@@ -852,7 +521,7 @@ void FillRectColor(
     COLORREF color
 )
 {
-    RECT rc{
+    RECT r{
         left,
         top,
         right,
@@ -860,29 +529,26 @@ void FillRectColor(
     };
 
     HBRUSH brush =
-        CreateSolidBrush(
-            color
-        );
+        CreateSolidBrush(color);
 
     FillRect(
         hdc,
-        &rc,
+        &r,
         brush
     );
 
-    DeleteObject(
-        brush
-    );
+    DeleteObject(brush);
 }
 
-
-void DrawTextCentered(
+static void DrawCenteredText(
     HDC hdc,
     const std::wstring& text,
-    RECT rc,
+    int left,
+    int top,
+    int right,
+    int bottom,
     int fontSize,
-    COLORREF color,
-    bool bold = true
+    bool bold
 )
 {
     HFONT font =
@@ -891,9 +557,7 @@ void DrawTextCentered(
             0,
             0,
             0,
-            bold
-                ? FW_BOLD
-                : FW_NORMAL,
+            bold ? FW_BOLD : FW_NORMAL,
             FALSE,
             FALSE,
             FALSE,
@@ -901,13 +565,16 @@ void DrawTextCentered(
             OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
             L"Arial"
         );
 
     HFONT old =
-        (HFONT)SelectObject(
-            hdc,
-            font
+        static_cast<HFONT>(
+            SelectObject(
+                hdc,
+                font
+            )
         );
 
     SetBkMode(
@@ -917,14 +584,21 @@ void DrawTextCentered(
 
     SetTextColor(
         hdc,
-        color
+        RGB(255, 255, 255)
     );
+
+    RECT r{
+        left,
+        top,
+        right,
+        bottom
+    };
 
     DrawTextW(
         hdc,
         text.c_str(),
         -1,
-        &rc,
+        &r,
         DT_CENTER |
         DT_VCENTER |
         DT_SINGLELINE
@@ -935,92 +609,62 @@ void DrawTextCentered(
         old
     );
 
-    DeleteObject(
-        font
-    );
+    DeleteObject(font);
 }
 
-
 // ============================================================
-// DRAW KEY
+// KEY DRAWING
 // ============================================================
 
-void DrawKey(
+static void DrawKey(
     HDC hdc,
+    const std::wstring& name,
     int x,
     int y,
-    int w,
-    int h,
-    const std::wstring& name,
-    const std::wstring& label
+    int width,
+    int height,
+    int fontSize = 18
 )
 {
     bool pressed =
-        IsButtonPressed(
-            name
-        );
+        IsHeld(name);
 
-    COLORREF fill;
-
-    if (pressed)
-    {
-        fill =
-            RGB(
-                230,
-                145,
-                40
-            );
-    }
-    else
-    {
-        fill =
-            RGB(
-                42,
-                42,
-                48
-            );
-    }
+    COLORREF background =
+        pressed
+        ? RGB(255, 170, 40)
+        : RGB(55, 55, 60);
 
     FillRectColor(
         hdc,
         x,
         y,
-        x + w,
-        y + h,
-        fill
+        x + width,
+        y + height,
+        background
     );
 
     HPEN pen =
         CreatePen(
             PS_SOLID,
             2,
-            RGB(
-                105,
-                105,
-                115
-            )
+            RGB(100, 100, 105)
         );
 
-    HPEN oldPen =
-        (HPEN)SelectObject(
-            hdc,
-            pen
-        );
+    HGDIOBJ oldPen =
+        SelectObject(hdc, pen);
 
-    HBRUSH oldBrush =
-        (HBRUSH)SelectObject(
+    HGDIOBJ oldBrush =
+        SelectObject(
             hdc,
-            GetStockObject(
-                NULL_BRUSH
-            )
+            GetStockObject(NULL_BRUSH)
         );
 
     Rectangle(
         hdc,
         x,
         y,
-        x + w,
-        y + h
+        x + width,
+        y + height
     );
 
     SelectObject(
@@ -1033,404 +677,354 @@ void DrawKey(
         oldPen
     );
 
-    DeleteObject(
-        pen
-    );
+    DeleteObject(pen);
 
-    RECT textRc{
+    DrawCenteredText(
+        hdc,
+        name,
         x,
         y,
-        x + w,
-        y + h
-    };
-
-    DrawTextCentered(
-        hdc,
-        label,
-        textRc,
-        max(
-            16,
-            h / 3
-        ),
-        RGB(
-            255,
-            255,
-            255
-        )
+        x + width,
+        y + height,
+        fontSize,
+        true
     );
 }
 
-
 // ============================================================
-// DRAW VIDEO FRAME
+// KEYBOARD
 // ============================================================
 
-void RenderScene(
+static void DrawKeyboard(
     HDC hdc
 )
 {
-    // Background
-    FillRectColor(
-        hdc,
-        0,
-        0,
-        VIDEO_WIDTH,
-        VIDEO_HEIGHT,
-        RGB(
-            16,
-            16,
-            20
-        )
-    );
-
-    // --------------------------------------------------------
-    // APM
-    // --------------------------------------------------------
-
-    wchar_t apmText[64];
-
-    swprintf_s(
-        apmText,
-        L"APM %d",
-        GetAPMAtTime(
-            currentTime
-        )
-    );
-
-    RECT apmRc{
-        0,
-        30,
-        VIDEO_WIDTH,
-        130
-    };
-
-    DrawTextCentered(
-        hdc,
-        apmText,
-        apmRc,
-        72,
-        RGB(
-            255,
-            255,
-            255
-        )
-    );
-
-    // --------------------------------------------------------
-    // Time
-    // --------------------------------------------------------
-
-    int minutes =
-        static_cast<int>(
-            currentTime / 60.0
-        );
-
-    double seconds =
-        currentTime -
-        minutes * 60.0;
-
-    wchar_t timeText[64];
-
-    swprintf_s(
-        timeText,
-        L"%02d:%06.3f",
-        minutes,
-        seconds
-    );
-
-    RECT timeRc{
-        0,
-        125,
-        VIDEO_WIDTH,
-        180
-    };
-
-    DrawTextCentered(
-        hdc,
-        timeText,
-        timeRc,
-        30,
-        RGB(
-            180,
-            180,
-            190
-        )
-    );
-
-    // --------------------------------------------------------
-    // Keyboard
-    // --------------------------------------------------------
-
-    const int keyW = 82;
-    const int keyH = 68;
+    const int keyW = 70;
+    const int keyH = 62;
     const int gap = 8;
 
-    const int startX = 80;
-    const int startY = 260;
+    const int startX = 300;
+    const int startY = 390;
 
     // Number row
-
-    const wchar_t* numberKeys[] =
+    const wchar_t* numbers[] =
     {
-        L"1",
-        L"2",
-        L"3",
-        L"4",
-        L"5",
-        L"6",
-        L"7",
-        L"8",
-        L"9",
-        L"0"
+        L"1", L"2", L"3", L"4", L"5",
+        L"6", L"7", L"8", L"9", L"0"
     };
 
     for (int i = 0; i < 10; ++i)
     {
         DrawKey(
             hdc,
-            startX +
-                i * (keyW + gap),
+            numbers[i],
+            startX + i * (keyW + gap),
             startY,
             keyW,
-            keyH,
-            numberKeys[i],
-            numberKeys[i]
+            keyH
         );
     }
 
-    // QWERTY
-
-    const wchar_t* row2[] =
+    // Q row
+    const wchar_t* qrow[] =
     {
-        L"Q",
-        L"W",
-        L"E",
-        L"R",
-        L"T",
-        L"Y",
-        L"U",
-        L"I",
-        L"O",
-        L"P"
+        L"Q", L"W", L"E", L"R", L"T",
+        L"Y", L"U", L"I", L"O", L"P"
     };
 
     for (int i = 0; i < 10; ++i)
     {
         DrawKey(
             hdc,
-            startX +
-                35 +
-                i * (keyW + gap),
-            startY +
-                keyH +
-                gap,
+            qrow[i],
+            startX + 30 + i * (keyW + gap),
+            startY + keyH + gap,
             keyW,
-            keyH,
-            row2[i],
-            row2[i]
+            keyH
         );
     }
 
-    // ASDF
-
-    const wchar_t* row3[] =
+    // A row
+    const wchar_t* arow[] =
     {
-        L"A",
-        L"S",
-        L"D",
-        L"F",
-        L"G",
-        L"H",
-        L"J",
-        L"K",
-        L"L"
+        L"A", L"S", L"D", L"F", L"G",
+        L"H", L"J", L"K", L"L"
     };
 
     for (int i = 0; i < 9; ++i)
     {
         DrawKey(
             hdc,
-            startX +
-                75 +
-                i * (keyW + gap),
-            startY +
-                2 * (keyH + gap),
+            arow[i],
+            startX + 65 + i * (keyW + gap),
+            startY + 2 * (keyH + gap),
             keyW,
-            keyH,
-            row3[i],
-            row3[i]
+            keyH
         );
     }
 
-    // Shift + ZXCVBNM
-
-    DrawKey(
-        hdc,
-        startX,
-        startY +
-            3 * (keyH + gap),
-        150,
-        keyH,
-        L"Left Shift",
-        L"SHIFT"
-    );
-
-    const wchar_t* row4[] =
+    // Z row
+    const wchar_t* zrow[] =
     {
-        L"Z",
-        L"X",
-        L"C",
-        L"V",
-        L"B",
-        L"N",
-        L"M"
+        L"Z", L"X", L"C", L"V", L"B",
+        L"N", L"M"
     };
 
     for (int i = 0; i < 7; ++i)
     {
         DrawKey(
             hdc,
-            startX +
-                158 +
-                i * (keyW + gap),
-            startY +
-                3 * (keyH + gap),
+            zrow[i],
+            startX + 105 + i * (keyW + gap),
+            startY + 3 * (keyH + gap),
             keyW,
-            keyH,
-            row4[i],
-            row4[i]
+            keyH
         );
     }
 
     // Space
-
     DrawKey(
         hdc,
-        startX + 300,
-        startY +
-            4 * (keyH + gap),
-        550,
-        keyH,
         L"Space",
-        L"SPACE"
+        startX + 180,
+        startY + 4 * (keyH + gap),
+        500,
+        keyH
     );
 
-    // Enter
-
+    // Modifiers
     DrawKey(
         hdc,
-        startX +
-            9 * (keyW + gap) -
-            10,
-        startY +
-            2 * (keyH + gap),
-        135,
+        L"Left Ctrl",
+        startX - 110,
+        startY + 4 * (keyH + gap),
+        110,
         keyH,
-        L"Enter",
-        L"ENTER"
+        15
     );
-
-    // Ctrl / Alt / Tab
 
     DrawKey(
         hdc,
-        startX,
-        startY +
-            4 * (keyH + gap),
+        L"Left Shift",
+        startX - 30,
+        startY + 3 * (keyH + gap),
         125,
         keyH,
-        L"Left Ctrl",
-        L"CTRL"
+        15
     );
 
     DrawKey(
         hdc,
-        startX + 135,
-        startY +
-            4 * (keyH + gap),
-        130,
-        keyH,
         L"Left Alt",
-        L"ALT"
+        startX + 55,
+        startY + 4 * (keyH + gap),
+        110,
+        keyH,
+        15
     );
 
     DrawKey(
         hdc,
-        startX + 850,
-        startY +
-            4 * (keyH + gap),
-        130,
+        L"Enter",
+        startX + 9 * (keyW + gap) - 15,
+        startY + 2 * (keyH + gap),
+        125,
         keyH,
-        L"Tab",
-        L"TAB"
+        16
     );
+}
 
-    // --------------------------------------------------------
-    // Mouse
-    // --------------------------------------------------------
+// ============================================================
+// MOUSE
+// ============================================================
 
-    int mouseX = 1250;
-    int mouseY = 320;
+static void DrawMouse(
+    HDC hdc
+)
+{
+    const int x = 1250;
+    const int y = 430;
+
+    bool left =
+        IsHeld(L"LMB");
+
+    bool right =
+        IsHeld(L"RMB");
 
     FillRectColor(
         hdc,
-        mouseX,
-        mouseY,
-        mouseX + 400,
-        mouseY + 350,
-        RGB(
-            28,
-            28,
-            34
-        )
+        x,
+        y,
+        x + 250,
+        y + 330,
+        RGB(45, 45, 50)
     );
 
-    RECT mouseTitle{
-        mouseX,
-        mouseY + 20,
-        mouseX + 400,
-        mouseY + 70
-    };
+    HPEN pen =
+        CreatePen(
+            PS_SOLID,
+            4,
+            RGB(120, 120, 125)
+        );
 
-    DrawTextCentered(
+    HGDIOBJ oldPen =
+        SelectObject(
+            hdc,
+            pen
+        );
+
+    HGDIOBJ oldBrush =
+        SelectObject(
+            hdc,
+            GetStockObject(NULL_BRUSH)
+        );
+
+    RoundRect(
+        hdc,
+        x,
+        y,
+        x + 250,
+        y + 330,
+        70,
+        70
+    );
+
+    SelectObject(
+        hdc,
+        oldBrush
+    );
+
+    SelectObject(
+        hdc,
+        oldPen
+    );
+
+    DeleteObject(pen);
+
+    FillRectColor(
+        hdc,
+        x + 15,
+        y + 15,
+        x + 118,
+        y + 155,
+        left
+            ? RGB(255, 170, 40)
+            : RGB(70, 70, 75)
+    );
+
+    FillRectColor(
+        hdc,
+        x + 132,
+        y + 15,
+        x + 235,
+        y + 155,
+        right
+            ? RGB(255, 170, 40)
+            : RGB(70, 70, 75)
+    );
+
+    DrawCenteredText(
+        hdc,
+        L"LMB",
+        x + 15,
+        y + 30,
+        x + 118,
+        y + 140,
+        25,
+        true
+    );
+
+    DrawCenteredText(
+        hdc,
+        L"RMB",
+        x + 132,
+        y + 30,
+        x + 235,
+        y + 140,
+        25,
+        true
+    );
+
+    DrawCenteredText(
         hdc,
         L"MOUSE",
-        mouseTitle,
-        28,
-        RGB(
-            190,
-            190,
-            200
-        )
+        x,
+        y + 180,
+        x + 250,
+        y + 240,
+        24,
+        true
     );
+}
 
-    DrawKey(
+// ============================================================
+// SCENE
+// ============================================================
+
+static void RenderScene(
+    HDC hdc,
+    int width,
+    int height
+)
+{
+    FillRectColor(
         hdc,
-        mouseX + 40,
-        mouseY + 105,
-        145,
-        100,
-        L"LMB",
-        L"LMB"
+        0,
+        0,
+        width,
+        height,
+        RGB(18, 18, 22)
     );
 
-    DrawKey(
+    int apm =
+        CalculateAPM(currentTime);
+
+    wchar_t apmText[64];
+
+    swprintf_s(
+        apmText,
+        L"APM %d",
+        apm
+    );
+
+    DrawCenteredText(
         hdc,
-        mouseX + 215,
-        mouseY + 105,
-        145,
-        100,
-        L"RMB",
-        L"RMB"
+        apmText,
+        0,
+        50,
+        width,
+        160,
+        70,
+        true
     );
 
-    // --------------------------------------------------------
+    wchar_t timeText[64];
+
+    swprintf_s(
+        timeText,
+        L"%02d:%05.2f",
+        static_cast<int>(currentTime / 60.0),
+        fmod(currentTime, 60.0)
+    );
+
+    DrawCenteredText(
+        hdc,
+        timeText,
+        0,
+        165,
+        width,
+        215,
+        26,
+        false
+    );
+
+    DrawKeyboard(hdc);
+    DrawMouse(hdc);
+
     // Progress bar
-    // --------------------------------------------------------
-
-    const int barX = 80;
-    const int barY = 990;
-    const int barW = 1760;
+    const int barX = 250;
+    const int barY = 920;
+    const int barW = 1420;
     const int barH = 18;
 
     FillRectColor(
@@ -1439,31 +1033,22 @@ void RenderScene(
         barY,
         barX + barW,
         barY + barH,
-        RGB(
-            50,
-            50,
-            58
-        )
+        RGB(50, 50, 55)
     );
 
-    double total =
-        duration +
-        TAIL_TIME;
+    double progress =
+        duration > 0.0
+        ? currentTime / duration
+        : 0.0;
 
-    double progress = 0.0;
-
-    if (total > 0.0)
-    {
-        progress =
-            currentTime /
-            total;
-    }
-
-    if (progress < 0.0)
-        progress = 0.0;
-
-    if (progress > 1.0)
-        progress = 1.0;
+    progress =
+        std::max(
+            0.0,
+            std::min(
+                1.0,
+                progress
+            )
+        );
 
     FillRectColor(
         hdc,
@@ -1474,45 +1059,89 @@ void RenderScene(
                 barW * progress
             ),
         barY + barH,
-        RGB(
-            230,
-            145,
-            40
-        )
+        RGB(255, 170, 40)
     );
 }
 
-
 // ============================================================
-// CREATE DIB
+// PREVIEW
 // ============================================================
 
-struct FrameBuffer
+static void DrawPreview(
+    HDC hdc,
+    RECT rc
+)
 {
-    HBITMAP bitmap = nullptr;
-    void* bits = nullptr;
-    HDC dc = nullptr;
-};
+    ResetPlaybackState();
 
+    ProcessEventsTo(currentTime);
 
-bool CreateFrameBuffer(
-    FrameBuffer& frame
+    RenderScene(
+        hdc,
+        rc.right - rc.left,
+        rc.bottom - rc.top
+    );
+}
+
+// ============================================================
+// LOAD
+// ============================================================
+
+static void LoadTimelineFromEditor()
+{
+    std::wstring text =
+        GetEditText(hwndTimeline);
+
+    if (!ParseTimeline(text))
+    {
+        MessageBoxW(
+            hwndMain,
+            L"No valid timeline events were found.\n\n"
+            L"Example:\n"
+            L"10:46:46.533 PM    1\n"
+            L"10:46:46.638 PM    2\n"
+            L"10:46:46.654 PM    1_UP",
+            L"Timeline Error",
+            MB_OK |
+            MB_ICONWARNING
+        );
+
+        return;
+    }
+
+    playing = false;
+
+    SetWindowTextW(
+        hwndPlay,
+        L"Play"
+    );
+
+    InvalidateRect(
+        hwndMain,
+        nullptr,
+        TRUE
+    );
+}
+
+// ============================================================
+// EXPORT HELPERS
+// ============================================================
+
+static HBITMAP CreateVideoBitmap(
+    HDC* outDC,
+    void** outBits
 )
 {
     HDC screen =
         GetDC(nullptr);
 
-    frame.dc =
-        CreateCompatibleDC(
-            screen
-        );
+    HDC memDC =
+        CreateCompatibleDC(screen);
 
     BITMAPINFO bmi{};
 
     bmi.bmiHeader.biSize =
-        sizeof(
-            BITMAPINFOHEADER
-        );
+        sizeof(BITMAPINFOHEADER);
 
     bmi.bmiHeader.biWidth =
         VIDEO_WIDTH;
@@ -1529,12 +1158,14 @@ bool CreateFrameBuffer(
     bmi.bmiHeader.biCompression =
         BI_RGB;
 
-    frame.bitmap =
+    void* bits = nullptr;
+
+    HBITMAP bitmap =
         CreateDIBSection(
-            screen,
+            memDC,
             &bmi,
             DIB_RGB_COLORS,
-            &frame.bits,
+            &bits,
             nullptr,
             0
         );
@@ -1544,86 +1175,75 @@ bool CreateFrameBuffer(
         screen
     );
 
-    if (
-        !frame.dc ||
-        !frame.bitmap ||
-        !frame.bits
-    )
+    if (!bitmap)
     {
-        return false;
+        DeleteDC(memDC);
+        return nullptr;
     }
 
-    SelectObject(
-        frame.dc,
-        frame.bitmap
-    );
+    *outDC = memDC;
+    *outBits = bits;
 
-    return true;
+    return bitmap;
 }
 
-
-void DestroyFrameBuffer(
-    FrameBuffer& frame
-)
-{
-    if (frame.bitmap)
-    {
-        DeleteObject(
-            frame.bitmap
-        );
-
-        frame.bitmap =
-            nullptr;
-    }
-
-    if (frame.dc)
-    {
-        DeleteDC(
-            frame.dc
-        );
-
-        frame.dc =
-            nullptr;
-    }
-
-    frame.bits =
-        nullptr;
-}
-
-
 // ============================================================
-// MEDIA FOUNDATION EXPORT
+// EXPORT MP4
 // ============================================================
 
-bool ExportMP4()
+static bool ExportMP4()
 {
     if (events.empty())
+    {
+        MessageBoxW(
+            hwndMain,
+            L"Load a timeline first.",
+            L"Export MP4",
+            MB_OK |
+            MB_ICONWARNING
+        );
+
         return false;
+    }
+
+    std::wstring outputPath =
+        []()
+        {
+            wchar_t path[MAX_PATH]{};
+
+            GetModuleFileNameW(
+                nullptr,
+                path,
+                MAX_PATH
+            );
+
+            std::wstring result(path);
+
+            size_t slash =
+                result.find_last_of(
+                    L"\\/"
+                );
+
+            if (slash != std::wstring::npos)
+                result.resize(slash);
+
+            return result +
+                L"\\APM_Replay.mp4";
+        }();
 
     HRESULT hr =
         MFStartup(
-            MF_VERSION
+            MF_VERSION,
+            MFSTARTUP_FULL
         );
 
     if (FAILED(hr))
         return false;
 
-    IMFAttributes* attributes =
-        nullptr;
-
-    IMFMediaType* outputType =
-        nullptr;
-
-    IMFMediaType* inputType =
-        nullptr;
-
-    IMFSourceReader* reader =
-        nullptr;
-
-    IMFSinkWriter* writer =
-        nullptr;
-
-    DWORD streamIndex = 0;
+    IMFAttributes* attributes = nullptr;
+    IMFSinkWriter* writer = nullptr;
+    IMFMediaType* outputType = nullptr;
+    IMFMediaType* inputType = nullptr;
 
     bool success = false;
 
@@ -1658,10 +1278,7 @@ bool ExportMP4()
         if (FAILED(hr))
             break;
 
-        // ----------------------------------------------------
-        // H264 OUTPUT
-        // ----------------------------------------------------
-
+        // Output H.264
         hr =
             MFCreateMediaType(
                 &outputType
@@ -1680,16 +1297,6 @@ bool ExportMP4()
             MFVideoFormat_H264
         );
 
-        outputType->SetUINT32(
-            MF_MT_AVG_BITRATE,
-            12000000
-        );
-
-        outputType->SetUINT32(
-            MF_MT_INTERLACE_MODE,
-            MFVideoInterlace_Progressive
-        );
-
         MFSetAttributeSize(
             outputType,
             MF_MT_FRAME_SIZE,
@@ -1700,7 +1307,7 @@ bool ExportMP4()
         MFSetAttributeRatio(
             outputType,
             MF_MT_FRAME_RATE,
-            VIDEO_FPS,
+            FPS,
             1
         );
 
@@ -1711,6 +1318,13 @@ bool ExportMP4()
             1
         );
 
+        outputType->SetUINT32(
+            MF_MT_AVG_BITRATE,
+            12000000
+        );
+
+        DWORD streamIndex = 0;
+
         hr =
             writer->AddStream(
                 outputType,
@@ -1720,10 +1334,7 @@ bool ExportMP4()
         if (FAILED(hr))
             break;
 
-        // ----------------------------------------------------
-        // RGB INPUT
-        // ----------------------------------------------------
-
+        // Input RGB32
         hr =
             MFCreateMediaType(
                 &inputType
@@ -1742,11 +1353,6 @@ bool ExportMP4()
             MFVideoFormat_RGB32
         );
 
-        inputType->SetUINT32(
-            MF_MT_INTERLACE_MODE,
-            MFVideoInterlace_Progressive
-        );
-
         MFSetAttributeSize(
             inputType,
             MF_MT_FRAME_SIZE,
@@ -1757,7 +1363,7 @@ bool ExportMP4()
         MFSetAttributeRatio(
             inputType,
             MF_MT_FRAME_RATE,
-            VIDEO_FPS,
+            FPS,
             1
         );
 
@@ -1784,69 +1390,64 @@ bool ExportMP4()
         if (FAILED(hr))
             break;
 
-        // ----------------------------------------------------
-        // FRAME BUFFER
-        // ----------------------------------------------------
+        HDC videoDC = nullptr;
+        void* bits = nullptr;
 
-        FrameBuffer frame;
+        HBITMAP bitmap =
+            CreateVideoBitmap(
+                &videoDC,
+                &bits
+            );
 
-        if (
-            !CreateFrameBuffer(
-                frame
-            )
-        )
-        {
+        if (!bitmap)
             break;
-        }
 
-        double total =
-            duration +
-            TAIL_TIME;
-
-        LONGLONG frameDuration =
-            10000000LL /
-            VIDEO_FPS;
-
-        LONGLONG frameCount =
-            static_cast<LONGLONG>(
-                std::ceil(
-                    total *
-                    VIDEO_FPS
+        HBITMAP oldBitmap =
+            static_cast<HBITMAP>(
+                SelectObject(
+                    videoDC,
+                    bitmap
                 )
             );
 
-        bool frameSuccess = true;
+        IMFMediaBuffer* buffer = nullptr;
+        IMFSample* sample = nullptr;
+
+        const long long totalFrames =
+            static_cast<long long>(
+                std::ceil(
+                    duration * FPS
+                )
+            );
 
         for (
-            LONGLONG i = 0;
-            i < frameCount;
-            ++i
+            long long frame = 0;
+            frame < totalFrames;
+            ++frame
         )
         {
             currentTime =
-                static_cast<double>(
-                    i
-                ) /
-                VIDEO_FPS;
+                static_cast<double>(frame) /
+                static_cast<double>(FPS);
 
-            // Reset and replay to this frame.
-            buttonStates.clear();
-            actionTimes.clear();
-            nextEvent = 0;
+            ResetPlaybackState();
 
             ProcessEventsTo(
                 currentTime
             );
 
+            RECT scene{
+                0,
+                0,
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT
+            };
+
             RenderScene(
-                frame.dc
+                videoDC,
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT
             );
-
-            IMFSample* sample =
-                nullptr;
-
-            IMFMediaBuffer* buffer =
-                nullptr;
 
             hr =
                 MFCreateMemoryBuffer(
@@ -1857,14 +1458,9 @@ bool ExportMP4()
                 );
 
             if (FAILED(hr))
-            {
-                frameSuccess = false;
                 break;
-            }
 
-            BYTE* destination =
-                nullptr;
-
+            BYTE* destination = nullptr;
             DWORD maxLength = 0;
             DWORD currentLength = 0;
 
@@ -1875,70 +1471,112 @@ bool ExportMP4()
                     &currentLength
                 );
 
-            if (SUCCEEDED(hr))
+            if (FAILED(hr))
             {
-                memcpy(
-                    destination,
-                    frame.bits,
-                    VIDEO_WIDTH *
-                    VIDEO_HEIGHT *
-                    4
-                );
-
-                buffer->Unlock();
-
-                buffer->SetCurrentLength(
-                    VIDEO_WIDTH *
-                    VIDEO_HEIGHT *
-                    4
-                );
-
-                hr =
-                    MFCreateSample(
-                        &sample
-                    );
-
-                if (SUCCEEDED(hr))
-                {
-                    sample->AddBuffer(
-                        buffer
-                    );
-
-                    sample->SetSampleTime(
-                        i *
-                        frameDuration
-                    );
-
-                    sample->SetSampleDuration(
-                        frameDuration
-                    );
-
-                    hr =
-                        writer->WriteSample(
-                            streamIndex,
-                            sample
-                        );
-                }
+                buffer->Release();
+                buffer = nullptr;
+                break;
             }
 
-            if (sample)
-                sample->Release();
+            const size_t byteCount =
+                static_cast<size_t>(
+                    VIDEO_WIDTH
+                ) *
+                static_cast<size_t>(
+                    VIDEO_HEIGHT
+                ) *
+                4;
 
-            if (buffer)
-                buffer->Release();
+            memcpy(
+                destination,
+                bits,
+                byteCount
+            );
+
+            buffer->Unlock();
+
+            hr =
+                buffer->SetCurrentLength(
+                    static_cast<DWORD>(
+                        byteCount
+                    )
+                );
 
             if (FAILED(hr))
             {
-                frameSuccess = false;
+                buffer->Release();
+                buffer = nullptr;
                 break;
             }
+
+            hr =
+                MFCreateSample(
+                    &sample
+                );
+
+            if (FAILED(hr))
+            {
+                buffer->Release();
+                buffer = nullptr;
+                break;
+            }
+
+            hr =
+                sample->AddBuffer(
+                    buffer
+                );
+
+            if (FAILED(hr))
+            {
+                sample->Release();
+                sample = nullptr;
+
+                buffer->Release();
+                buffer = nullptr;
+
+                break;
+            }
+
+            const LONGLONG sampleTime =
+                static_cast<LONGLONG>(
+                    frame
+                ) *
+                10000000LL /
+                FPS;
+
+            sample->SetSampleTime(
+                sampleTime
+            );
+
+            sample->SetSampleDuration(
+                10000000LL / FPS
+            );
+
+            hr =
+                writer->WriteSample(
+                    streamIndex,
+                    sample
+                );
+
+            sample->Release();
+            sample = nullptr;
+
+            buffer->Release();
+            buffer = nullptr;
+
+            if (FAILED(hr))
+                break;
         }
 
-        DestroyFrameBuffer(
-            frame
+        SelectObject(
+            videoDC,
+            oldBitmap
         );
 
-        if (!frameSuccess)
+        DeleteObject(bitmap);
+        DeleteDC(videoDC);
+
+        if (FAILED(hr))
             break;
 
         hr =
@@ -1954,9 +1592,6 @@ bool ExportMP4()
     if (writer)
         writer->Release();
 
-    if (reader)
-        reader->Release();
-
     if (inputType)
         inputType->Release();
 
@@ -1968,364 +1603,48 @@ bool ExportMP4()
 
     MFShutdown();
 
-    return success;
-}
+    currentTime = 0.0;
+    ResetPlaybackState();
 
-
-// ============================================================
-// EXPORT THREAD
-// ============================================================
-
-DWORD WINAPI ExportThreadProc(
-    LPVOID
-)
-{
-    bool success =
-        ExportMP4();
-
-    PostMessageW(
-        hwnd,
-        WM_EXPORT_DONE,
-        success
-            ? 1
-            : 0,
-        0
-    );
-
-    return 0;
-}
-
-
-void StartExport()
-{
-    if (exporting)
-        return;
-
-    if (events.empty())
+    if (success)
     {
-        SetWindowTextW(
-            statusText,
-            L"Load a timeline first."
+        MessageBoxW(
+            hwndMain,
+            (L"MP4 exported successfully:\n\n" +
+             outputPath).c_str(),
+            L"Export Complete",
+            MB_OK |
+            MB_ICONINFORMATION
         );
-
-        return;
-    }
-
-    wchar_t exePath[MAX_PATH];
-
-    DWORD length =
-        GetModuleFileNameW(
-            nullptr,
-            exePath,
-            MAX_PATH
-        );
-
-    std::wstring directory(
-        exePath,
-        length
-    );
-
-    size_t slash =
-        directory.find_last_of(
-            L"\\/"
-        );
-
-    if (
-        slash !=
-        std::wstring::npos
-    )
-    {
-        directory =
-            directory.substr(
-                0,
-                slash
-            );
-    }
-
-    outputPath =
-        directory +
-        L"\\APM_Replay.mp4";
-
-    exporting = true;
-
-    SetWindowTextW(
-        statusText,
-        L"Exporting MP4..."
-    );
-
-    EnableWindow(
-        timelineEdit,
-        FALSE
-    );
-
-    EnableWindow(
-        GetDlgItem(
-            hwnd,
-            ID_LOAD
-        ),
-        FALSE
-    );
-
-    EnableWindow(
-        playButton,
-        FALSE
-    );
-
-    EnableWindow(
-        GetDlgItem(
-            hwnd,
-            ID_RESET
-        ),
-        FALSE
-    );
-
-    EnableWindow(
-        GetDlgItem(
-            hwnd,
-            ID_EXPORT
-        ),
-        FALSE
-    );
-
-    exportThread =
-        CreateThread(
-            nullptr,
-            0,
-            ExportThreadProc,
-            nullptr,
-            0,
-            nullptr
-        );
-
-    if (!exportThread)
-    {
-        exporting = false;
-
-        EnableWindow(
-            timelineEdit,
-            TRUE
-        );
-
-        EnableWindow(
-            GetDlgItem(
-                hwnd,
-                ID_LOAD
-            ),
-            TRUE
-        );
-
-        EnableWindow(
-            playButton,
-            TRUE
-        );
-
-        EnableWindow(
-            GetDlgItem(
-                hwnd,
-                ID_RESET
-            ),
-            TRUE
-        );
-
-        EnableWindow(
-            GetDlgItem(
-                hwnd,
-                ID_EXPORT
-            ),
-            TRUE
-        );
-
-        SetWindowTextW(
-            statusText,
-            L"Could not start export."
-        );
-    }
-}
-
-
-// ============================================================
-// PREVIEW
-// ============================================================
-
-void DrawPreview(
-    HDC hdc,
-    RECT client
-)
-{
-    int width =
-        client.right -
-        client.left;
-
-    int height =
-        client.bottom -
-        client.top;
-
-    FillRectColor(
-        hdc,
-        0,
-        0,
-        width,
-        height,
-        RGB(
-            12,
-            12,
-            15
-        )
-    );
-
-    if (width <= 20 ||
-        height <= 20)
-    {
-        return;
-    }
-
-    double videoAspect =
-        static_cast<double>(
-            VIDEO_WIDTH
-        ) /
-        VIDEO_HEIGHT;
-
-    double clientAspect =
-        static_cast<double>(
-            width
-        ) /
-        height;
-
-    int drawW;
-    int drawH;
-
-    if (
-        clientAspect >
-        videoAspect
-    )
-    {
-        drawH =
-            height;
-
-        drawW =
-            static_cast<int>(
-                drawH *
-                videoAspect
-            );
     }
     else
     {
-        drawW =
-            width;
-
-        drawH =
-            static_cast<int>(
-                drawW /
-                videoAspect
-            );
+        MessageBoxW(
+            hwndMain,
+            L"MP4 export failed.\n\n"
+            L"Windows Media Foundation could not "
+            L"create the H.264 video.",
+            L"Export Failed",
+            MB_OK |
+            MB_ICONERROR
+        );
     }
 
-    int x =
-        (width - drawW) /
-        2;
-
-    int y =
-        (height - drawH) /
-        2;
-
-    HDC memoryDC =
-        CreateCompatibleDC(
-            hdc
-        );
-
-    BITMAPINFO bmi{};
-
-    bmi.bmiHeader.biSize =
-        sizeof(
-            BITMAPINFOHEADER
-        );
-
-    bmi.bmiHeader.biWidth =
-        VIDEO_WIDTH;
-
-    bmi.bmiHeader.biHeight =
-        -VIDEO_HEIGHT;
-
-    bmi.bmiHeader.biPlanes =
-        1;
-
-    bmi.bmiHeader.biBitCount =
-        32;
-
-    bmi.bmiHeader.biCompression =
-        BI_RGB;
-
-    void* bits = nullptr;
-
-    HBITMAP bitmap =
-        CreateDIBSection(
-            hdc,
-            &bmi,
-            DIB_RGB_COLORS,
-            &bits,
-            nullptr,
-            0
-        );
-
-    if (!bitmap)
-    {
-        DeleteDC(
-            memoryDC
-        );
-
-        return;
-    }
-
-    HBITMAP old =
-        (HBITMAP)SelectObject(
-            memoryDC,
-            bitmap
-        );
-
-    RenderScene(
-        memoryDC
+    InvalidateRect(
+        hwndMain,
+        nullptr,
+        TRUE
     );
 
-    SetStretchBltMode(
-        hdc,
-        HALFTONE
-    );
-
-    StretchBlt(
-        hdc,
-        x,
-        y,
-        drawW,
-        drawH,
-        memoryDC,
-        0,
-        0,
-        VIDEO_WIDTH,
-        VIDEO_HEIGHT,
-        SRCCOPY
-    );
-
-    SelectObject(
-        memoryDC,
-        old
-    );
-
-    DeleteObject(
-        bitmap
-    );
-
-    DeleteDC(
-        memoryDC
-    );
+    return success;
 }
-
 
 // ============================================================
 // WINDOW PROCEDURE
 // ============================================================
 
-LRESULT CALLBACK WndProc(
-    HWND hWnd,
+static LRESULT CALLBACK WindowProc(
+    HWND hwnd,
     UINT msg,
     WPARAM wParam,
     LPARAM lParam
@@ -2335,7 +1654,7 @@ LRESULT CALLBACK WndProc(
     {
         case WM_CREATE:
         {
-            timelineEdit =
+            hwndTimeline =
                 CreateWindowExW(
                     WS_EX_CLIENTEDGE,
                     L"EDIT",
@@ -2344,49 +1663,48 @@ LRESULT CALLBACK WndProc(
                     WS_VISIBLE |
                     ES_MULTILINE |
                     ES_AUTOVSCROLL |
-                    ES_AUTOHSCROLL |
+                    ES_WANTRETURN |
                     WS_VSCROLL |
                     WS_HSCROLL,
                     20,
                     20,
-                    1360,
-                    260,
-                    hWnd,
-                    (HMENU)ID_EDIT,
-                    GetModuleHandleW(
-                        nullptr
-                    ),
+                    1050,
+                    220,
+                    hwnd,
+                    nullptr,
+                    nullptr,
                     nullptr
                 );
 
             SendMessageW(
-                timelineEdit,
-                EM_SETLIMITTEXT,
-                2 * 1024 * 1024,
-                0
-            );
-
-            // Buttons
-
-            CreateWindowW(
-                L"BUTTON",
-                L"Load Timeline",
-                WS_CHILD |
-                WS_VISIBLE |
-                BS_PUSHBUTTON,
-                20,
-                295,
-                150,
-                38,
-                hWnd,
-                (HMENU)ID_LOAD,
-                GetModuleHandleW(
-                    nullptr
+                hwndTimeline,
+                WM_SETFONT,
+                reinterpret_cast<WPARAM>(
+                    GetStockObject(
+                        DEFAULT_GUI_FONT
+                    )
                 ),
-                nullptr
+                TRUE
             );
 
-            playButton =
+            hwndLoad =
+                CreateWindowW(
+                    L"BUTTON",
+                    L"Load Timeline",
+                    WS_CHILD |
+                    WS_VISIBLE |
+                    BS_PUSHBUTTON,
+                    20,
+                    255,
+                    150,
+                    40,
+                    hwnd,
+                    reinterpret_cast<HMENU>(1001),
+                    nullptr,
+                    nullptr
+                );
+
+            hwndPlay =
                 CreateWindowW(
                     L"BUTTON",
                     L"Play",
@@ -2394,74 +1712,60 @@ LRESULT CALLBACK WndProc(
                     WS_VISIBLE |
                     BS_PUSHBUTTON,
                     180,
-                    295,
+                    255,
                     100,
-                    38,
-                    hWnd,
-                    (HMENU)ID_PLAY,
-                    GetModuleHandleW(
-                        nullptr
-                    ),
-                    nullptr
-                );
-
-            CreateWindowW(
-                L"BUTTON",
-                L"Reset",
-                WS_CHILD |
-                WS_VISIBLE |
-                BS_PUSHBUTTON,
-                290,
-                295,
-                100,
-                38,
-                hWnd,
-                (HMENU)ID_RESET,
-                GetModuleHandleW(
-                    nullptr
-                ),
-                nullptr
-            );
-
-            CreateWindowW(
-                L"BUTTON",
-                L"Export MP4",
-                WS_CHILD |
-                WS_VISIBLE |
-                BS_PUSHBUTTON,
-                400,
-                295,
-                120,
-                38,
-                hWnd,
-                (HMENU)ID_EXPORT,
-                GetModuleHandleW(
-                    nullptr
-                ),
-                nullptr
-            );
-
-            statusText =
-                CreateWindowW(
-                    L"STATIC",
-                    L"Paste your timeline above, then click Load Timeline.",
-                    WS_CHILD |
-                    WS_VISIBLE,
-                    540,
-                    300,
-                    800,
-                    30,
-                    hWnd,
+                    40,
+                    hwnd,
+                    reinterpret_cast<HMENU>(1002),
                     nullptr,
-                    GetModuleHandleW(
-                        nullptr
-                    ),
                     nullptr
                 );
+
+            hwndReset =
+                CreateWindowW(
+                    L"BUTTON",
+                    L"Reset",
+                    WS_CHILD |
+                    WS_VISIBLE |
+                    BS_PUSHBUTTON,
+                    290,
+                    255,
+                    100,
+                    40,
+                    hwnd,
+                    reinterpret_cast<HMENU>(1003),
+                    nullptr,
+                    nullptr
+                );
+
+            hwndExport =
+                CreateWindowW(
+                    L"BUTTON",
+                    L"Export MP4",
+                    WS_CHILD |
+                    WS_VISIBLE |
+                    BS_PUSHBUTTON,
+                    400,
+                    255,
+                    130,
+                    40,
+                    hwnd,
+                    reinterpret_cast<HMENU>(1004),
+                    nullptr,
+                    nullptr
+                );
+
+            QueryPerformanceFrequency(
+                &performanceFrequency
+            );
+
+            QueryPerformanceCounter(
+                &lastPerformanceTime
+            );
 
             SetTimer(
-                hWnd,
-                1,
+                hwnd,
+                TIMER_PREVIEW,
                 16,
                 nullptr
             );
@@ -2471,99 +1775,104 @@ LRESULT CALLBACK WndProc(
 
         case WM_COMMAND:
         {
-            switch (
-                LOWORD(wParam)
-            )
+            switch (LOWORD(wParam))
             {
-                case ID_LOAD:
-                    LoadTimeline();
-                    break;
+                case 1001:
+                    LoadTimelineFromEditor();
+                    return 0;
 
-                case ID_PLAY:
+                case 1002:
                 {
                     if (events.empty())
-                    {
-                        SetWindowTextW(
-                            statusText,
-                            L"Load a timeline first."
-                        );
+                        return 0;
 
-                        break;
-                    }
-
-                    if (
-                        currentTime >=
-                        duration +
-                        TAIL_TIME
-                    )
-                    {
-                        ResetSimulation();
-                    }
-
-                    playing =
-                        !playing;
+                    playing = !playing;
 
                     SetWindowTextW(
-                        playButton,
+                        hwndPlay,
                         playing
                             ? L"Pause"
                             : L"Play"
                     );
 
-                    break;
+                    QueryPerformanceCounter(
+                        &lastPerformanceTime
+                    );
+
+                    return 0;
                 }
 
-                case ID_RESET:
-                    ResetSimulation();
-                    break;
+                case 1003:
+                {
+                    playing = false;
+                    currentTime = 0.0;
 
-                case ID_EXPORT:
-                    StartExport();
-                    break;
+                    ResetPlaybackState();
+
+                    SetWindowTextW(
+                        hwndPlay,
+                        L"Play"
+                    );
+
+                    InvalidateRect(
+                        hwnd,
+                        nullptr,
+                        TRUE
+                    );
+
+                    return 0;
+                }
+
+                case 1004:
+                    ExportMP4();
+                    return 0;
             }
 
-            return 0;
+            break;
         }
 
         case WM_TIMER:
         {
-            if (
-                wParam == 1 &&
-                playing &&
-                !exporting
-            )
+            if (wParam == TIMER_PREVIEW &&
+                playing)
             {
-                currentTime +=
-                    1.0 /
-                    VIDEO_FPS;
+                LARGE_INTEGER now{};
 
-                ProcessEventsTo(
-                    currentTime
+                QueryPerformanceCounter(
+                    &now
                 );
 
-                if (
-                    currentTime >=
-                    duration +
-                    TAIL_TIME
-                )
-                {
-                    currentTime =
-                        duration +
-                        TAIL_TIME;
+                double delta =
+                    static_cast<double>(
+                        now.QuadPart -
+                        lastPerformanceTime.QuadPart
+                    ) /
+                    static_cast<double>(
+                        performanceFrequency.QuadPart
+                    );
 
-                    playing =
-                        false;
+                lastPerformanceTime =
+                    now;
+
+                currentTime += delta;
+
+                if (currentTime >= duration)
+                {
+                    currentTime = duration;
+                    playing = false;
 
                     SetWindowTextW(
-                        playButton,
+                        hwndPlay,
                         L"Play"
                     );
+
+                    ResetPlaybackState();
                 }
 
                 InvalidateRect(
-                    hWnd,
+                    hwnd,
                     nullptr,
-                    FALSE
+                    TRUE
                 );
             }
 
@@ -2572,34 +1881,119 @@ LRESULT CALLBACK WndProc(
 
         case WM_PAINT:
         {
-            PAINTSTRUCT ps;
+            PAINTSTRUCT ps{};
 
             HDC hdc =
                 BeginPaint(
-                    hWnd,
+                    hwnd,
                     &ps
                 );
 
-            RECT rc;
-
+            RECT client{};
             GetClientRect(
-                hWnd,
-                &rc
+                hwnd,
+                &client
             );
 
-            RECT preview =
-                rc;
+            const int sceneTop = 315;
 
-            preview.top =
-                345;
-
-            DrawPreview(
+            FillRectColor(
                 hdc,
-                preview
+                0,
+                sceneTop,
+                client.right,
+                client.bottom,
+                RGB(18, 18, 22)
             );
+
+            // Preview uses scaled scene.
+            int previewWidth =
+                client.right;
+
+            int previewHeight =
+                client.bottom - sceneTop;
+
+            if (previewWidth > 0 &&
+                previewHeight > 0)
+            {
+                HDC memDC =
+                    CreateCompatibleDC(hdc);
+
+                BITMAPINFO bmi{};
+
+                bmi.bmiHeader.biSize =
+                    sizeof(BITMAPINFOHEADER);
+
+                bmi.bmiHeader.biWidth =
+                    previewWidth;
+
+                bmi.bmiHeader.biHeight =
+                    -previewHeight;
+
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression =
+                    BI_RGB;
+
+                void* bits = nullptr;
+
+                HBITMAP bitmap =
+                    CreateDIBSection(
+                        hdc,
+                        &bmi,
+                        DIB_RGB_COLORS,
+                        &bits,
+                        nullptr,
+                        0
+                    );
+
+                if (bitmap)
+                {
+                    HBITMAP oldBitmap =
+                        static_cast<HBITMAP>(
+                            SelectObject(
+                                memDC,
+                                bitmap
+                            )
+                        );
+
+                    // Render directly at preview resolution.
+                    ResetPlaybackState();
+                    ProcessEventsTo(
+                        currentTime
+                    );
+
+                    RenderScene(
+                        memDC,
+                        previewWidth,
+                        previewHeight
+                    );
+
+                    BitBlt(
+                        hdc,
+                        0,
+                        sceneTop,
+                        previewWidth,
+                        previewHeight,
+                        memDC,
+                        0,
+                        0,
+                        SRCCOPY
+                    );
+
+                    SelectObject(
+                        memDC,
+                        oldBitmap
+                    );
+
+                    DeleteObject(bitmap);
+                }
+
+                DeleteDC(memDC);
+            }
 
             EndPaint(
-                hWnd,
+                hwnd,
                 &ps
             );
 
@@ -2608,172 +2002,18 @@ LRESULT CALLBACK WndProc(
 
         case WM_SIZE:
         {
-            if (timelineEdit)
+            int width =
+                LOWORD(lParam);
+
+            if (hwndTimeline)
             {
-                int width =
-                    LOWORD(lParam);
-
-                int height =
-                    HIWORD(lParam);
-
-                int editWidth =
-                    max(
-                        300,
-                        width - 40
-                    );
-
                 MoveWindow(
-                    timelineEdit,
+                    hwndTimeline,
                     20,
                     20,
-                    editWidth,
-                    260,
+                    width - 40,
+                    220,
                     TRUE
-                );
-
-                HWND load =
-                    GetDlgItem(
-                        hWnd,
-                        ID_LOAD
-                    );
-
-                HWND play =
-                    GetDlgItem(
-                        hWnd,
-                        ID_PLAY
-                    );
-
-                HWND reset =
-                    GetDlgItem(
-                        hWnd,
-                        ID_RESET
-                    );
-
-                HWND exportButton =
-                    GetDlgItem(
-                        hWnd,
-                        ID_EXPORT
-                    );
-
-                if (load)
-                    MoveWindow(
-                        load,
-                        20,
-                        295,
-                        150,
-                        38,
-                        TRUE
-                    );
-
-                if (play)
-                    MoveWindow(
-                        play,
-                        180,
-                        295,
-                        100,
-                        38,
-                        TRUE
-                    );
-
-                if (reset)
-                    MoveWindow(
-                        reset,
-                        290,
-                        295,
-                        100,
-                        38,
-                        TRUE
-                    );
-
-                if (exportButton)
-                    MoveWindow(
-                        exportButton,
-                        400,
-                        295,
-                        120,
-                        38,
-                        TRUE
-                    );
-
-                if (statusText)
-                {
-                    MoveWindow(
-                        statusText,
-                        540,
-                        300,
-                        max(
-                            300,
-                            width - 560
-                        ),
-                        30,
-                        TRUE
-                    );
-                }
-            }
-
-            return 0;
-        }
-
-        case WM_EXPORT_DONE:
-        {
-            exporting = false;
-
-            if (exportThread)
-            {
-                CloseHandle(
-                    exportThread
-                );
-
-                exportThread =
-                    nullptr;
-            }
-
-            EnableWindow(
-                timelineEdit,
-                TRUE
-            );
-
-            EnableWindow(
-                GetDlgItem(
-                    hWnd,
-                    ID_LOAD
-                ),
-                TRUE
-            );
-
-            EnableWindow(
-                playButton,
-                TRUE
-            );
-
-            EnableWindow(
-                GetDlgItem(
-                    hWnd,
-                    ID_RESET
-                ),
-                TRUE
-            );
-
-            EnableWindow(
-                GetDlgItem(
-                    hWnd,
-                    ID_EXPORT
-                ),
-                TRUE
-            );
-
-            if (wParam)
-            {
-                SetWindowTextW(
-                    statusText,
-                    L"MP4 exported: APM_Replay.mp4"
-                );
-            }
-            else
-            {
-                SetWindowTextW(
-                    statusText,
-                    L"MP4 export failed."
                 );
             }
 
@@ -2783,41 +2023,23 @@ LRESULT CALLBACK WndProc(
         case WM_DESTROY:
         {
             KillTimer(
-                hWnd,
-                1
+                hwnd,
+                TIMER_PREVIEW
             );
 
-            if (exportThread)
-            {
-                WaitForSingleObject(
-                    exportThread,
-                    INFINITE
-                );
-
-                CloseHandle(
-                    exportThread
-                );
-
-                exportThread =
-                    nullptr;
-            }
-
-            PostQuitMessage(
-                0
-            );
+            PostQuitMessage(0);
 
             return 0;
         }
     }
 
     return DefWindowProcW(
-        hWnd,
+        hwnd,
         msg,
         wParam,
         lParam
     );
 }
-
 
 // ============================================================
 // ENTRY POINT
@@ -2830,16 +2052,13 @@ int WINAPI wWinMain(
     int nCmdShow
 )
 {
-    WNDCLASSEXW wc{};
+    WNDCLASSW wc{};
 
-    wc.cbSize =
-        sizeof(wc);
+    wc.lpfnWndProc =
+        WindowProc;
 
     wc.hInstance =
         hInstance;
-
-    wc.lpfnWndProc =
-        WndProc;
 
     wc.lpszClassName =
         L"APMTimelineVisualizer";
@@ -2851,15 +2070,16 @@ int WINAPI wWinMain(
         );
 
     wc.hbrBackground =
-        (HBRUSH)(
-            COLOR_WINDOW + 1
+        static_cast<HBRUSH>(
+            GetStockObject(
+                WHITE_BRUSH
+            )
         );
 
-    RegisterClassExW(
-        &wc
-    );
+    if (!RegisterClassW(&wc))
+        return 1;
 
-    hwnd =
+    hwndMain =
         CreateWindowExW(
             0,
             wc.lpszClassName,
@@ -2867,45 +2087,38 @@ int WINAPI wWinMain(
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            1420,
-            900,
+            DEFAULT_WIDTH,
+            DEFAULT_HEIGHT,
             nullptr,
             nullptr,
             hInstance,
             nullptr
         );
 
-    if (!hwnd)
+    if (!hwndMain)
         return 1;
 
     ShowWindow(
-        hwnd,
+        hwndMain,
         nCmdShow
     );
 
-    UpdateWindow(
-        hwnd
-    );
+    UpdateWindow(hwndMain);
 
-    MSG msg;
+    MSG msg{};
 
-    while (
-        GetMessageW(
-            &msg,
-            nullptr,
-            0,
-            0
-        ) > 0
-    )
+    while (GetMessageW(
+        &msg,
+        nullptr,
+        0,
+        0
+    ) > 0)
     {
-        TranslateMessage(
-            &msg
-        );
-
-        DispatchMessageW(
-            &msg
-        );
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    return 0;
+    return static_cast<int>(
+        msg.wParam
+    );
 }
