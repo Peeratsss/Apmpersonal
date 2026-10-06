@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
-#include <map>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -39,10 +38,11 @@ static CRITICAL_SECTION actionLock;
 
 static std::vector<ULONGLONG> actions;
 
-// Guarantees that APM eventually reaches zero.
+// Used to guarantee APM reaches 0 after 60 seconds
+// without any input.
 static ULONGLONG lastActionTime = 0;
 
-// Keyboard repeat tracking.
+// Maximum of 5 keydown events per held key.
 static BYTE keyRepeatCount[256] = { 0 };
 
 // ============================================================
@@ -58,47 +58,7 @@ struct InputStat
 static std::vector<InputStat> inputStats;
 
 // ============================================================
-// FORWARD DECLARATIONS
-// ============================================================
-
-void SaveSettings();
-void LoadSettings();
-
-void SaveInputStats();
-
-void RemoveOldActionsLocked();
-
-void Action(const std::wstring& inputName);
-
-int GetAPM();
-
-void ResetAPM();
-
-void DrawOverlay();
-
-void SetClickableMode(bool enabled);
-
-LRESULT CALLBACK WindowProc(
-    HWND hwnd,
-    UINT msg,
-    WPARAM wParam,
-    LPARAM lParam
-);
-
-LRESULT CALLBACK KeyboardHookProc(
-    int nCode,
-    WPARAM wParam,
-    LPARAM lParam
-);
-
-LRESULT CALLBACK MouseHookProc(
-    int nCode,
-    WPARAM wParam,
-    LPARAM lParam
-);
-
-// ============================================================
-// GET EXE DIRECTORY
+// PATHS
 // ============================================================
 
 std::wstring GetExeDirectory()
@@ -122,15 +82,21 @@ std::wstring GetExeDirectory()
     return fullPath.substr(0, pos);
 }
 
-// ============================================================
-// SETTINGS FILE
-// ============================================================
-
 std::wstring GetSettingsPath()
 {
     return GetExeDirectory() +
            L"\\APMOverlay.txt";
 }
+
+std::wstring GetInputStatsPath()
+{
+    return GetExeDirectory() +
+           L"\\Inputs.txt";
+}
+
+// ============================================================
+// SAVE / LOAD WINDOW SETTINGS
+// ============================================================
 
 void SaveSettings()
 {
@@ -203,14 +169,8 @@ void LoadSettings()
 }
 
 // ============================================================
-// INPUT STATISTICS FILE
+// INPUT STATISTICS
 // ============================================================
-
-std::wstring GetInputStatsPath()
-{
-    return GetExeDirectory() +
-           L"\\Inputs.txt";
-}
 
 void SaveInputStats()
 {
@@ -224,7 +184,6 @@ void SaveInputStats()
 
     for (const auto& stat : inputStats)
     {
-        // Convert wide string to UTF-8.
         int sizeNeeded =
             WideCharToMultiByte(
                 CP_UTF8,
@@ -274,7 +233,6 @@ void RecordInputLocked(
         {
             stat.count++;
 
-            // Update the file immediately.
             SaveInputStats();
 
             return;
@@ -282,12 +240,17 @@ void RecordInputLocked(
     }
 
     InputStat newStat;
-    newStat.name = inputName;
-    newStat.count = 1;
 
-    inputStats.push_back(newStat);
+    newStat.name =
+        inputName;
 
-    // Update immediately when a new input appears.
+    newStat.count =
+        1;
+
+    inputStats.push_back(
+        newStat
+    );
+
     SaveInputStats();
 }
 
@@ -306,9 +269,8 @@ void RemoveOldActionsLocked()
     // --------------------------------------------------------
     // HARD ZERO FIX
     //
-    // If there has been absolutely no input for 60 seconds,
-    // there is no reason for anything to remain in the APM
-    // history.
+    // If absolutely no input happened for 60 seconds,
+    // there cannot be anything left in the APM window.
     // --------------------------------------------------------
 
     if (
@@ -318,12 +280,14 @@ void RemoveOldActionsLocked()
     )
     {
         actions.clear();
+
         lastActionTime = 0;
+
         return;
     }
 
     // --------------------------------------------------------
-    // Remove everything older than 60 seconds.
+    // Remove actions 60 seconds old or older.
     // --------------------------------------------------------
 
     if (!actions.empty())
@@ -346,7 +310,6 @@ void RemoveOldActionsLocked()
         );
     }
 
-    // Extra safety.
     if (actions.empty())
         lastActionTime = 0;
 }
@@ -366,9 +329,12 @@ void Action(
         &actionLock
     );
 
-    actions.push_back(now);
+    actions.push_back(
+        now
+    );
 
-    lastActionTime = now;
+    lastActionTime =
+        now;
 
     RecordInputLocked(
         inputName
@@ -431,7 +397,7 @@ void ResetAPM()
 }
 
 // ============================================================
-// KEY NAME
+// GET KEY NAME
 // ============================================================
 
 std::wstring GetKeyName(
@@ -484,9 +450,6 @@ std::wstring GetKeyName(
 
         case VK_CAPITAL:
             return L"Caps Lock";
-
-        case VK_TAB:
-            return L"Tab";
 
         case VK_INSERT:
             return L"Insert";
@@ -568,42 +531,7 @@ std::wstring GetKeyName(
 
         case VK_F12:
             return L"F12";
-    }
 
-    // A-Z
-    if (
-        (vkCode >= 'A' && vkCode <= 'Z')
-    )
-    {
-        wchar_t buffer[2] = {};
-
-        buffer[0] =
-            static_cast<wchar_t>(
-                vkCode
-            );
-
-        return buffer;
-    }
-
-    // 0-9
-    if (
-        vkCode >= '0' &&
-        vkCode <= '9'
-    )
-    {
-        wchar_t buffer[2] = {};
-
-        buffer[0] =
-            static_cast<wchar_t>(
-                vkCode
-            );
-
-        return buffer;
-    }
-
-    // Numpad
-    switch (vkCode)
-    {
         case VK_NUMPAD0:
             return L"Num0";
 
@@ -648,11 +576,7 @@ std::wstring GetKeyName(
 
         case VK_DIVIDE:
             return L"Num /";
-    }
 
-    // OEM keys
-    switch (vkCode)
-    {
         case VK_OEM_1:
             return L";";
 
@@ -687,6 +611,38 @@ std::wstring GetKeyName(
             return L"'";
     }
 
+    // A-Z
+    if (
+        vkCode >= 'A' &&
+        vkCode <= 'Z'
+    )
+    {
+        wchar_t buffer[2] = {};
+
+        buffer[0] =
+            static_cast<wchar_t>(
+                vkCode
+            );
+
+        return buffer;
+    }
+
+    // 0-9
+    if (
+        vkCode >= '0' &&
+        vkCode <= '9'
+    )
+    {
+        wchar_t buffer[2] = {};
+
+        buffer[0] =
+            static_cast<wchar_t>(
+                vkCode
+            );
+
+        return buffer;
+    }
+
     // Fallback
     wchar_t name[64] = {};
 
@@ -701,11 +657,13 @@ std::wstring GetKeyName(
             scanCode << 16
         );
 
-    if (GetKeyNameTextW(
-        lParam,
-        name,
-        64
-    ))
+    if (
+        GetKeyNameTextW(
+            lParam,
+            name,
+            64
+        )
+    )
     {
         return name;
     }
@@ -735,7 +693,6 @@ LRESULT CALLBACK KeyboardHookProc(
                 lParam
             );
 
-        // Ignore injected/synthetic keyboard input.
         if (
             kb &&
             !(kb->flags & LLKHF_INJECTED)
@@ -756,10 +713,7 @@ LRESULT CALLBACK KeyboardHookProc(
                     wParam == WM_SYSKEYDOWN
                 )
                 {
-                    // Windows can generate repeated
-                    // keydown events while holding a key.
-                    //
-                    // First press + maximum 5 repeats.
+                    // First keydown + maximum 5 repeats.
                     if (
                         keyRepeatCount[vk] < 5
                     )
@@ -834,7 +788,6 @@ LRESULT CALLBACK MouseHookProc(
                 lParam
             );
 
-        // Ignore injected/synthetic mouse input.
         if (
             ms &&
             !(ms->flags & LLMHF_INJECTED)
@@ -926,15 +879,13 @@ void DrawStyledText(
     const int offsets[][2] =
     {
         {-outline, -outline},
-        {0,        -outline},
-        {outline,  -outline},
-
+        {0, -outline},
+        {outline, -outline},
         {-outline, 0},
-        {outline,  0},
-
+        {outline, 0},
         {-outline, outline},
-        {0,        outline},
-        {outline,  outline}
+        {0, outline},
+        {outline, outline}
     };
 
     for (
@@ -1026,6 +977,12 @@ void DrawOverlay()
         windowRect.bottom -
         windowRect.top;
 
+    if (overlayWidth <= 0 ||
+        overlayHeight <= 0)
+    {
+        return;
+    }
+
     HDC screenDC =
         GetDC(nullptr);
 
@@ -1066,13 +1023,20 @@ void DrawOverlay()
             0
         );
 
+    if (!bitmap)
+    {
+        DeleteDC(memDC);
+        ReleaseDC(nullptr, screenDC);
+        return;
+    }
+
     HBITMAP oldBitmap =
         (HBITMAP)SelectObject(
             memDC,
             bitmap
         );
 
-    // Completely transparent background.
+    // Transparent background.
     RECT fullRect =
     {
         0,
@@ -1089,9 +1053,9 @@ void DrawOverlay()
         )
     );
 
-    // --------------------------------------------------------
+    // ========================================================
     // CLICKABLE MODE TOP BAR
-    // --------------------------------------------------------
+    // ========================================================
 
     if (clickableMode)
     {
@@ -1119,9 +1083,9 @@ void DrawOverlay()
         );
     }
 
-    // --------------------------------------------------------
+    // ========================================================
     // FONT
-    // --------------------------------------------------------
+    // ========================================================
 
     int fontHeight =
         max(
@@ -1155,9 +1119,9 @@ void DrawOverlay()
             font
         );
 
-    // --------------------------------------------------------
+    // ========================================================
     // APM TEXT
-    // --------------------------------------------------------
+    // ========================================================
 
     std::wstring text =
         L"APM " +
@@ -1179,9 +1143,9 @@ void DrawOverlay()
         textRect
     );
 
-    // --------------------------------------------------------
-    // CREATE ALPHA BITMAP
-    // --------------------------------------------------------
+    // ========================================================
+    // CONVERT TO ALPHA
+    // ========================================================
 
     if (bits)
     {
@@ -1237,15 +1201,12 @@ void DrawOverlay()
                     (static_cast<DWORD>(
                         brightness
                     ) << 24) |
-
                     (static_cast<DWORD>(
                         red
                     ) << 16) |
-
                     (static_cast<DWORD>(
                         green
                     ) << 8) |
-
                     static_cast<DWORD>(
                         blue
                     );
@@ -1333,7 +1294,7 @@ void SetClickableMode(
     clickableMode =
         enabled;
 
-    LONG_PTR style =
+    LONG_PTR exStyle =
         GetWindowLongPtrW(
             hwnd,
             GWL_EXSTYLE
@@ -1341,16 +1302,16 @@ void SetClickableMode(
 
     if (clickableMode)
     {
-        style &=
+        exStyle &=
             ~WS_EX_TRANSPARENT;
 
-        style |=
+        exStyle |=
             WS_EX_LAYERED |
             WS_EX_TOPMOST;
     }
     else
     {
-        style |=
+        exStyle |=
             WS_EX_TRANSPARENT |
             WS_EX_LAYERED |
             WS_EX_TOPMOST;
@@ -1359,10 +1320,10 @@ void SetClickableMode(
     SetWindowLongPtrW(
         hwnd,
         GWL_EXSTYLE,
-        style
+        exStyle
     );
 
-    LONG_PTR windowStyle =
+    LONG_PTR style =
         GetWindowLongPtrW(
             hwnd,
             GWL_STYLE
@@ -1370,19 +1331,19 @@ void SetClickableMode(
 
     if (clickableMode)
     {
-        windowStyle |=
+        style |=
             WS_THICKFRAME;
     }
     else
     {
-        windowStyle &=
+        style &=
             ~WS_THICKFRAME;
     }
 
     SetWindowLongPtrW(
         hwnd,
         GWL_STYLE,
-        windowStyle
+        style
     );
 
     SetWindowPos(
@@ -1401,7 +1362,7 @@ void SetClickableMode(
 }
 
 // ============================================================
-// TRAY
+// TRAY MENU
 // ============================================================
 
 #define WM_TRAYICON     (WM_USER + 1)
@@ -1600,8 +1561,7 @@ LRESULT CALLBACK WindowProc(
                 pt.y -
                 rect.top;
 
-            const int grip =
-                8;
+            const int grip = 8;
 
             bool left =
                 x < grip;
@@ -1643,7 +1603,6 @@ LRESULT CALLBACK WindowProc(
             if (bottom)
                 return HTBOTTOM;
 
-            // Allow dragging from the top bar.
             if (
                 y >= 0 &&
                 y < TOP_BAR_HEIGHT
@@ -1704,6 +1663,7 @@ LRESULT CALLBACK WindowProc(
         case WM_DESTROY:
         {
             SaveSettings();
+
             SaveInputStats();
 
             if (keyboardHook)
@@ -1820,9 +1780,9 @@ int WINAPI WinMain(
         return 1;
     }
 
-    // --------------------------------------------------------
+    // ========================================================
     // TRAY ICON
-    // --------------------------------------------------------
+    // ========================================================
 
     NOTIFYICONDATAW nid = {};
 
@@ -1859,9 +1819,9 @@ int WINAPI WinMain(
         &nid
     );
 
-    // --------------------------------------------------------
-    // HOOKS
-    // --------------------------------------------------------
+    // ========================================================
+    // GLOBAL INPUT HOOKS
+    // ========================================================
 
     keyboardHook =
         SetWindowsHookExW(
@@ -1879,17 +1839,17 @@ int WINAPI WinMain(
             0
         );
 
-    // --------------------------------------------------------
-    // INITIAL MODE
-    // --------------------------------------------------------
+    // ========================================================
+    // START IN PASS-THROUGH MODE
+    // ========================================================
 
     SetClickableMode(
         false
     );
 
-    // --------------------------------------------------------
+    // ========================================================
     // REFRESH EVERY SECOND
-    // --------------------------------------------------------
+    // ========================================================
 
     SetTimer(
         hwnd,
@@ -1909,9 +1869,9 @@ int WINAPI WinMain(
 
     DrawOverlay();
 
-    // --------------------------------------------------------
+    // ========================================================
     // MESSAGE LOOP
-    // --------------------------------------------------------
+    // ========================================================
 
     MSG msg;
 
@@ -1932,6 +1892,10 @@ int WINAPI WinMain(
             &msg
         );
     }
+
+    // ========================================================
+    // REMOVE TRAY ICON
+    // ========================================================
 
     NOTIFYICONDATAW removeIcon = {};
 
