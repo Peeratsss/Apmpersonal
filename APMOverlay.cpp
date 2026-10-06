@@ -75,7 +75,8 @@ std::wstring GetExeDirectory()
 
     std::wstring result(path);
 
-    size_t slash = result.find_last_of(L"\\/");
+    size_t slash =
+        result.find_last_of(L"\\/");
 
     if (slash != std::wstring::npos)
         result.resize(slash);
@@ -86,13 +87,15 @@ std::wstring GetExeDirectory()
 
 std::wstring GetSettingsPath()
 {
-    return GetExeDirectory() + L"\\APMOverlay.txt";
+    return GetExeDirectory() +
+           L"\\APMOverlay.txt";
 }
 
 
 std::wstring GetInputStatsPath()
 {
-    return GetExeDirectory() + L"\\Inputs.txt";
+    return GetExeDirectory() +
+           L"\\Inputs.txt";
 }
 
 
@@ -100,7 +103,9 @@ std::wstring GetInputStatsPath()
 // UTF-8
 // ============================================================
 
-std::string WideToUTF8(const std::wstring& text)
+std::string WideToUTF8(
+    const std::wstring& text
+)
 {
     if (text.empty())
         return "";
@@ -120,7 +125,10 @@ std::string WideToUTF8(const std::wstring& text)
     if (size <= 0)
         return "";
 
-    std::string result(size - 1, '\0');
+    std::string result(
+        size - 1,
+        '\0'
+    );
 
     WideCharToMultiByte(
         CP_UTF8,
@@ -170,18 +178,27 @@ void LoadSettings()
 
     while (std::getline(file, line))
     {
-        size_t equals = line.find(L'=');
+        size_t equals =
+            line.find(L'=');
 
         if (equals == std::wstring::npos)
             continue;
 
         std::wstring key =
-            line.substr(0, equals);
+            line.substr(
+                0,
+                equals
+            );
 
         std::wstring value =
-            line.substr(equals + 1);
+            line.substr(
+                equals + 1
+            );
 
-        int number = _wtoi(value.c_str());
+        int number =
+            _wtoi(
+                value.c_str()
+            );
 
         if (key == L"X")
             overlayX = number;
@@ -201,6 +218,47 @@ void LoadSettings()
 
     if (overlayHeight < 20)
         overlayHeight = 20;
+}
+
+
+// ============================================================
+// WINDOWS LOCAL CLOCK
+// ============================================================
+
+std::wstring GetCurrentTimeString()
+{
+    SYSTEMTIME time;
+
+    // Reads the computer's Windows local clock.
+    GetLocalTime(
+        &time
+    );
+
+    int hour =
+        time.wHour;
+
+    bool pm =
+        hour >= 12;
+
+    int displayHour =
+        hour % 12;
+
+    if (displayHour == 0)
+        displayHour = 12;
+
+    wchar_t buffer[64] = {};
+
+    swprintf_s(
+        buffer,
+        L"%02d:%02d:%02d.%03d %s",
+        displayHour,
+        time.wMinute,
+        time.wSecond,
+        time.wMilliseconds,
+        pm ? L"PM" : L"AM"
+    );
+
+    return buffer;
 }
 
 
@@ -232,6 +290,7 @@ void SaveInputStats()
     }
 
     file << "\n\n";
+
     file << "=== INPUT TIMELINE ===\n\n";
 
     for (const auto& input : inputTimeline)
@@ -244,10 +303,10 @@ void SaveInputStats()
 
 
 // ============================================================
-// INPUT TRACKER
+// RECORD BUTTON PRESS
 // ============================================================
 
-void RecordInputLocked(
+void RecordButtonPressLocked(
     const std::wstring& name
 )
 {
@@ -270,10 +329,68 @@ void RecordInputLocked(
         stat.name = name;
         stat.count = 1;
 
-        inputStats.push_back(stat);
+        inputStats.push_back(
+            stat
+        );
     }
+}
 
-    inputTimeline.push_back(name);
+
+// ============================================================
+// RECORD TIMELINE EVENT
+// ============================================================
+
+void RecordTimelineLocked(
+    const std::wstring& name
+)
+{
+    std::wstring entry =
+        GetCurrentTimeString();
+
+    entry += L"\t";
+
+    entry += name;
+
+    inputTimeline.push_back(
+        entry
+    );
+}
+
+
+// ============================================================
+// RECORD PRESS
+// ============================================================
+
+void RecordInputLocked(
+    const std::wstring& name
+)
+{
+    // Button count only counts presses.
+    RecordButtonPressLocked(
+        name
+    );
+
+    // Timeline records the exact Windows
+    // local clock time including milliseconds.
+    RecordTimelineLocked(
+        name
+    );
+
+    SaveInputStats();
+}
+
+
+// ============================================================
+// RECORD RELEASE
+// ============================================================
+
+void RecordReleaseLocked(
+    const std::wstring& name
+)
+{
+    RecordTimelineLocked(
+        name + L"_UP"
+    );
 
     SaveInputStats();
 }
@@ -285,12 +402,17 @@ void RecordInputLocked(
 
 void ResetAPM()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     actions.clear();
+
     lastActionTime = 0;
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
     InvalidateRect(
         hwnd,
@@ -306,9 +428,12 @@ void ResetAPM()
 
 void ResetInputTracker()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     inputStats.clear();
+
     inputTimeline.clear();
 
     for (int i = 0; i < 256; ++i)
@@ -316,7 +441,9 @@ void ResetInputTracker()
 
     SaveInputStats();
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
     InvalidateRect(
         hwnd,
@@ -327,7 +454,7 @@ void ResetInputTracker()
 
 
 // ============================================================
-// APM CLEANUP
+// REMOVE OLD APM ACTIONS
 // ============================================================
 
 void RemoveOldActionsLocked()
@@ -345,7 +472,9 @@ void RemoveOldActionsLocked()
     )
     {
         actions.clear();
+
         lastActionTime = 0;
+
         return;
     }
 
@@ -385,16 +514,25 @@ void Action(
     ULONGLONG now =
         GetTickCount64();
 
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     RemoveOldActionsLocked();
 
-    actions.push_back(now);
+    actions.push_back(
+        now
+    );
+
     lastActionTime = now;
 
-    RecordInputLocked(inputName);
+    RecordInputLocked(
+        inputName
+    );
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
     InvalidateRect(
         hwnd,
@@ -410,7 +548,9 @@ void Action(
 
 int GetAPM()
 {
-    EnterCriticalSection(&actionLock);
+    EnterCriticalSection(
+        &actionLock
+    );
 
     RemoveOldActionsLocked();
 
@@ -419,7 +559,9 @@ int GetAPM()
             actions.size()
         );
 
-    LeaveCriticalSection(&actionLock);
+    LeaveCriticalSection(
+        &actionLock
+    );
 
     return result;
 }
@@ -610,7 +752,10 @@ std::wstring GetKeyName(
         break;
     }
 
-    if (vk >= 'A' && vk <= 'Z')
+    if (
+        vk >= 'A' &&
+        vk <= 'Z'
+    )
     {
         wchar_t buffer[2] = {
             static_cast<wchar_t>(vk),
@@ -620,7 +765,10 @@ std::wstring GetKeyName(
         return buffer;
     }
 
-    if (vk >= '0' && vk <= '9')
+    if (
+        vk >= '0' &&
+        vk <= '9'
+    )
     {
         wchar_t buffer[2] = {
             static_cast<wchar_t>(vk),
@@ -663,7 +811,7 @@ std::wstring GetKeyName(
 
 
 // ============================================================
-// MOUSE NAME
+// MOUSE BUTTON NAME
 // ============================================================
 
 std::wstring GetMouseButtonName(
@@ -673,23 +821,29 @@ std::wstring GetMouseButtonName(
     switch (wParam)
     {
     case WM_LBUTTONDOWN:
-        return L"Left Click";
+    case WM_LBUTTONUP:
+        return L"LMB";
 
     case WM_RBUTTONDOWN:
-        return L"Right Click";
+    case WM_RBUTTONUP:
+        return L"RMB";
 
     case WM_MBUTTONDOWN:
-        return L"Middle Click";
+    case WM_MBUTTONUP:
+        return L"MMB";
 
     case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
     {
         WORD button =
-            GET_XBUTTON_WPARAM(wParam);
+            GET_XBUTTON_WPARAM(
+                wParam
+            );
 
         if (button == XBUTTON1)
-            return L"XButton 1";
+            return L"X1";
 
-        return L"XButton 2";
+        return L"X2";
     }
 
     default:
@@ -711,17 +865,19 @@ LRESULT CALLBACK KeyboardProc(
     if (nCode == HC_ACTION)
     {
         KBDLLHOOKSTRUCT* data =
-            reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+            reinterpret_cast<KBDLLHOOKSTRUCT*>(
+                lParam
+            );
 
         if (data)
         {
-            // Ignore injected/synthetic input.
             if (!(data->flags & LLKHF_INJECTED))
             {
-                DWORD vk = data->vkCode;
+                DWORD vk =
+                    data->vkCode;
 
-                // F8/F9 are ignored.
-                // F10 is NOT a reset key.
+                // F8 and F9 remain ignored.
+                // F10 is a normal tracked key.
                 if (
                     vk != VK_F8 &&
                     vk != VK_F9 &&
@@ -733,9 +889,9 @@ LRESULT CALLBACK KeyboardProc(
                         wParam == WM_SYSKEYDOWN
                     )
                     {
-                        // Count only the first 5 repeats
-                        // while a key is held.
-                        if (keyRepeatCount[vk] < 5)
+                        if (
+                            keyRepeatCount[vk] < 5
+                        )
                         {
                             keyRepeatCount[vk]++;
 
@@ -749,7 +905,22 @@ LRESULT CALLBACK KeyboardProc(
                         wParam == WM_SYSKEYUP
                     )
                     {
+                        std::wstring name =
+                            GetKeyName(vk);
+
+                        EnterCriticalSection(
+                            &actionLock
+                        );
+
+                        RecordReleaseLocked(
+                            name
+                        );
+
                         keyRepeatCount[vk] = 0;
+
+                        LeaveCriticalSection(
+                            &actionLock
+                        );
                     }
                 }
             }
@@ -778,11 +949,12 @@ LRESULT CALLBACK MouseProc(
     if (nCode == HC_ACTION)
     {
         MSLLHOOKSTRUCT* data =
-            reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+            reinterpret_cast<MSLLHOOKSTRUCT*>(
+                lParam
+            );
 
         if (data)
         {
-            // Ignore injected/synthetic mouse input.
             if (!(data->flags & LLMHF_INJECTED))
             {
                 switch (wParam)
@@ -799,6 +971,32 @@ LRESULT CALLBACK MouseProc(
                     );
 
                     break;
+
+
+                case WM_LBUTTONUP:
+                case WM_RBUTTONUP:
+                case WM_MBUTTONUP:
+                case WM_XBUTTONUP:
+                {
+                    std::wstring name =
+                        GetMouseButtonName(
+                            wParam
+                        );
+
+                    EnterCriticalSection(
+                        &actionLock
+                    );
+
+                    RecordReleaseLocked(
+                        name
+                    );
+
+                    LeaveCriticalSection(
+                        &actionLock
+                    );
+
+                    break;
+                }
                 }
             }
         }
@@ -856,7 +1054,7 @@ void DrawStyledText(
         TRANSPARENT
     );
 
-    // Dark outline / shadow.
+    // Dark outline.
     SetTextColor(
         dc,
         RGB(0, 0, 0)
@@ -878,7 +1076,7 @@ void DrawStyledText(
         }
     }
 
-    // Main white text.
+    // Main text.
     SetTextColor(
         dc,
         RGB(255, 255, 255)
@@ -899,7 +1097,9 @@ void DrawStyledText(
         oldFont
     );
 
-    DeleteObject(font);
+    DeleteObject(
+        font
+    );
 }
 
 
@@ -917,7 +1117,10 @@ void DrawOverlay(
     int height =
         overlayHeight;
 
-    if (width <= 0 || height <= 0)
+    if (
+        width <= 0 ||
+        height <= 0
+    )
         return;
 
     int scaledWidth =
@@ -995,14 +1198,18 @@ void DrawOverlay(
         background
     );
 
-    DeleteObject(background);
+    DeleteObject(
+        background
+    );
 
     int apm =
         GetAPM();
 
     std::wstring text =
         L"APM " +
-        std::to_wstring(apm);
+        std::to_wstring(
+            apm
+        );
 
     int fontHeight =
         static_cast<int>(
@@ -1020,7 +1227,6 @@ void DrawOverlay(
         fontHeight
     );
 
-    // Downsample 2x -> normal size.
     HDC finalDC =
         CreateCompatibleDC(
             targetDC
@@ -1069,10 +1275,14 @@ void DrawOverlay(
             );
 
         BYTE* src =
-            static_cast<BYTE*>(bits);
+            static_cast<BYTE*>(
+                bits
+            );
 
         BYTE* dst =
-            static_cast<BYTE*>(finalBits);
+            static_cast<BYTE*>(
+                finalBits
+            );
 
         for (int y = 0; y < height; ++y)
         {
@@ -1088,13 +1298,25 @@ void DrawOverlay(
                 unsigned int g = 0;
                 unsigned int r = 0;
 
-                for (int yy = 0; yy < RENDER_SCALE; ++yy)
+                for (
+                    int yy = 0;
+                    yy < RENDER_SCALE;
+                    ++yy
+                )
                 {
-                    for (int xx = 0; xx < RENDER_SCALE; ++xx)
+                    for (
+                        int xx = 0;
+                        xx < RENDER_SCALE;
+                        ++xx
+                    )
                     {
                         BYTE* pixel =
                             src +
-                            ((sy + yy) * scaledWidth + (sx + xx)) * 4;
+                            (
+                                (sy + yy) *
+                                scaledWidth +
+                                (sx + xx)
+                            ) * 4;
 
                         b += pixel[0];
                         g += pixel[1];
@@ -1108,7 +1330,10 @@ void DrawOverlay(
 
                 BYTE* out =
                     dst +
-                    (y * width + x) * 4;
+                    (
+                        (y * width + x)
+                        * 4
+                    );
 
                 out[0] =
                     static_cast<BYTE>(
@@ -1151,16 +1376,22 @@ void DrawOverlay(
         );
     }
 
-    DeleteDC(finalDC);
+    DeleteDC(
+        finalDC
+    );
 
     SelectObject(
         highDC,
         oldBitmap
     );
 
-    DeleteObject(bitmap);
+    DeleteObject(
+        bitmap
+    );
 
-    DeleteDC(highDC);
+    DeleteDC(
+        highDC
+    );
 }
 
 
@@ -1371,7 +1602,9 @@ void ShowTrayMenu()
         nullptr
     );
 
-    DestroyMenu(menu);
+    DestroyMenu(
+        menu
+    );
 }
 
 
@@ -1471,13 +1704,15 @@ LRESULT CALLBACK WndProc(
                 pt.x <= grip;
 
             bool right =
-                pt.x >= rect.right - grip;
+                pt.x >=
+                rect.right - grip;
 
             bool top =
                 pt.y <= grip;
 
             bool bottom =
-                pt.y >= rect.bottom - grip;
+                pt.y >=
+                rect.bottom - grip;
 
             if (top && left)
                 return HTTOPLEFT;
@@ -1590,7 +1825,6 @@ LRESULT CALLBACK WndProc(
             dc
         );
 
-        // Visible white resize bar in clickable mode.
         if (clickableMode)
         {
             RECT bar = {
@@ -1611,7 +1845,9 @@ LRESULT CALLBACK WndProc(
                 brush
             );
 
-            DeleteObject(brush);
+            DeleteObject(
+                brush
+            );
         }
 
         EndPaint(
@@ -1631,6 +1867,7 @@ LRESULT CALLBACK WndProc(
     case WM_DESTROY:
 
         SaveSettings();
+
         SaveInputStats();
 
         KillTimer(
@@ -1658,7 +1895,9 @@ LRESULT CALLBACK WndProc(
 
         RemoveTrayIcon();
 
-        PostQuitMessage(0);
+        PostQuitMessage(
+            0
+        );
 
         return 0;
     }
@@ -1770,8 +2009,11 @@ int WINAPI WinMain(
         );
 
     // Start in pass-through mode.
-    SetClickableMode(false);
+    SetClickableMode(
+        false
+    );
 
+    // Update APM once per second.
     SetTimer(
         hwnd,
         1,
@@ -1784,7 +2026,9 @@ int WINAPI WinMain(
         SW_SHOWNOACTIVATE
     );
 
-    UpdateWindow(hwnd);
+    UpdateWindow(
+        hwnd
+    );
 
     MSG msg;
 
