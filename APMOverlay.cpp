@@ -5,15 +5,41 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <map>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
+
+
+// ============================================================
+// SETTINGS
+// ============================================================
+
+static const int DEFAULT_WIDTH  = 150;
+static const int DEFAULT_HEIGHT = 45;
+
+static const int REFRESH_MS = 1000;
+
+static const int MAX_KEY_REPEATS = 5;
+
+static const UINT WM_TRAYICON = WM_APP + 1;
+
+static const UINT ID_TRAY_CLICKABLE = 1001;
+static const UINT ID_TRAY_RESET_APM = 1002;
+static const UINT ID_TRAY_RESET_INPUT = 1003;
+static const UINT ID_TRAY_EXIT = 1004;
+
+
+// ============================================================
+// GLOBALS
+// ============================================================
 
 static HWND hwnd = nullptr;
 
@@ -22,240 +48,59 @@ static HHOOK mouseHook = nullptr;
 
 static bool clickableMode = false;
 
-static int overlayX = 20;
-static int overlayY = 20;
-static int overlayWidth = 150;
-static int overlayHeight = 45;
+static int overlayWidth = DEFAULT_WIDTH;
+static int overlayHeight = DEFAULT_HEIGHT;
 
-static const int TOP_BAR_HEIGHT = 6;
-static const int RENDER_SCALE = 2;
-
-static CRITICAL_SECTION actionLock;
+static std::wstring settingsPath;
+static std::wstring inputsPath;
 
 static std::vector<ULONGLONG> actions;
-static ULONGLONG lastActionTime = 0;
 
-static BYTE keyRepeatCount[256] = { 0 };
+static CRITICAL_SECTION actionCS;
 
-struct InputStat
+static std::map<DWORD, int> keyRepeatCounts;
+
+static std::map<std::wstring, int> buttonCounts;
+
+static std::vector<std::wstring> timelineLines;
+
+
+// ============================================================
+// TIME
+// ============================================================
+
+ULONGLONG NowTick()
 {
-    std::wstring name;
-    unsigned long long count;
-};
-
-static std::vector<InputStat> inputStats;
-static std::vector<std::wstring> inputTimeline;
-
-
-// ============================================================
-// TRAY
-// ============================================================
-
-#define WM_TRAYICON      (WM_USER + 1)
-
-#define ID_TRAY_CLICK    1001
-#define ID_TRAY_RESET    1002
-#define ID_TRAY_INPUT    1003
-#define ID_TRAY_EXIT     1004
-
-
-// ============================================================
-// FILE PATHS
-// ============================================================
-
-std::wstring GetExeDirectory()
-{
-    wchar_t path[MAX_PATH] = {};
-
-    GetModuleFileNameW(
-        nullptr,
-        path,
-        MAX_PATH
-    );
-
-    std::wstring result(path);
-
-    size_t slash =
-        result.find_last_of(L"\\/");
-
-    if (slash != std::wstring::npos)
-        result.resize(slash);
-
-    return result;
+    return GetTickCount64();
 }
 
 
-std::wstring GetSettingsPath()
+std::wstring GetClockTime()
 {
-    return GetExeDirectory() +
-           L"\\APMOverlay.txt";
-}
+    SYSTEMTIME st;
+    GetLocalTime(&st);
 
+    wchar_t buffer[64];
 
-std::wstring GetInputStatsPath()
-{
-    return GetExeDirectory() +
-           L"\\Inputs.txt";
-}
+    int hour = st.wHour;
+    const wchar_t* ampm = L"AM";
 
+    if (hour >= 12)
+        ampm = L"PM";
 
-// ============================================================
-// UTF-8
-// ============================================================
-
-std::string WideToUTF8(
-    const std::wstring& text
-)
-{
-    if (text.empty())
-        return "";
-
-    int size =
-        WideCharToMultiByte(
-            CP_UTF8,
-            0,
-            text.c_str(),
-            -1,
-            nullptr,
-            0,
-            nullptr,
-            nullptr
-        );
-
-    if (size <= 0)
-        return "";
-
-    std::string result(
-        size - 1,
-        '\0'
-    );
-
-    WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        text.c_str(),
-        -1,
-        &result[0],
-        size,
-        nullptr,
-        nullptr
-    );
-
-    return result;
-}
-
-
-// ============================================================
-// SETTINGS
-// ============================================================
-
-void SaveSettings()
-{
-    std::wofstream file(
-        GetSettingsPath()
-    );
-
-    if (!file.is_open())
-        return;
-
-    file << L"X=" << overlayX << L"\n";
-    file << L"Y=" << overlayY << L"\n";
-    file << L"Width=" << overlayWidth << L"\n";
-    file << L"Height=" << overlayHeight << L"\n";
-}
-
-
-void LoadSettings()
-{
-    std::wifstream file(
-        GetSettingsPath()
-    );
-
-    if (!file.is_open())
-        return;
-
-    std::wstring line;
-
-    while (std::getline(file, line))
-    {
-        size_t equals =
-            line.find(L'=');
-
-        if (equals == std::wstring::npos)
-            continue;
-
-        std::wstring key =
-            line.substr(
-                0,
-                equals
-            );
-
-        std::wstring value =
-            line.substr(
-                equals + 1
-            );
-
-        int number =
-            _wtoi(
-                value.c_str()
-            );
-
-        if (key == L"X")
-            overlayX = number;
-
-        else if (key == L"Y")
-            overlayY = number;
-
-        else if (key == L"Width")
-            overlayWidth = number;
-
-        else if (key == L"Height")
-            overlayHeight = number;
-    }
-
-    if (overlayWidth < 50)
-        overlayWidth = 50;
-
-    if (overlayHeight < 20)
-        overlayHeight = 20;
-}
-
-
-// ============================================================
-// WINDOWS LOCAL CLOCK
-// ============================================================
-
-std::wstring GetCurrentTimeString()
-{
-    SYSTEMTIME time;
-
-    // Reads the computer's Windows local clock.
-    GetLocalTime(
-        &time
-    );
-
-    int hour =
-        time.wHour;
-
-    bool pm =
-        hour >= 12;
-
-    int displayHour =
-        hour % 12;
+    int displayHour = hour % 12;
 
     if (displayHour == 0)
         displayHour = 12;
-
-    wchar_t buffer[64] = {};
 
     swprintf_s(
         buffer,
         L"%02d:%02d:%02d.%03d %s",
         displayHour,
-        time.wMinute,
-        time.wSecond,
-        time.wMilliseconds,
-        pm ? L"PM" : L"AM"
+        st.wMinute,
+        st.wSecond,
+        st.wMilliseconds,
+        ampm
     );
 
     return buffer;
@@ -263,155 +108,238 @@ std::wstring GetCurrentTimeString()
 
 
 // ============================================================
-// INPUT TRACKER FILE
+// PATHS
 // ============================================================
 
-void SaveInputStats()
+std::wstring GetExeDirectory()
 {
-    std::ofstream file(
-        GetInputStatsPath(),
-        std::ios::out |
-        std::ios::trunc |
-        std::ios::binary
+    wchar_t buffer[MAX_PATH];
+
+    DWORD length =
+        GetModuleFileNameW(
+            nullptr,
+            buffer,
+            MAX_PATH
+        );
+
+    if (length == 0)
+        return L".";
+
+    std::wstring path(
+        buffer,
+        length
     );
 
-    if (!file.is_open())
-        return;
+    size_t slash =
+        path.find_last_of(
+            L"\\/"
+        );
 
-    file << "=== BUTTON PRESS COUNTS ===\n\n";
-
-    for (const auto& stat : inputStats)
+    if (
+        slash == std::wstring::npos
+    )
     {
-        file
-            << WideToUTF8(stat.name)
-            << " = "
-            << stat.count
-            << "\n";
+        return L".";
     }
 
-    file << "\n\n";
-
-    file << "=== INPUT TIMELINE ===\n\n";
-
-    for (const auto& input : inputTimeline)
-    {
-        file
-            << WideToUTF8(input)
-            << "\n";
-    }
+    return path.substr(
+        0,
+        slash
+    );
 }
 
 
 // ============================================================
-// RECORD BUTTON PRESS
+// SETTINGS SAVE / LOAD
 // ============================================================
 
-void RecordButtonPressLocked(
-    const std::wstring& name
-)
+void SaveWindowSettings()
 {
-    bool found = false;
+    if (!hwnd)
+        return;
 
-    for (auto& stat : inputStats)
+    RECT rc;
+
+    if (
+        !GetWindowRect(
+            hwnd,
+            &rc
+        )
+    )
     {
-        if (stat.name == name)
-        {
-            stat.count++;
-            found = true;
-            break;
-        }
+        return;
     }
 
-    if (!found)
+    std::wofstream file(
+        settingsPath
+    );
+
+    if (!file)
+        return;
+
+    file
+        << rc.left << L"\n"
+        << rc.top << L"\n"
+        << (rc.right - rc.left) << L"\n"
+        << (rc.bottom - rc.top) << L"\n";
+}
+
+
+void LoadWindowSettings()
+{
+    std::wifstream file(
+        settingsPath
+    );
+
+    if (!file)
+        return;
+
+    int x;
+    int y;
+    int width;
+    int height;
+
+    if (
+        file >>
+        x >>
+        y >>
+        width >>
+        height
+    )
     {
-        InputStat stat;
+        if (width >= 100)
+            overlayWidth = width;
 
-        stat.name = name;
-        stat.count = 1;
+        if (height >= 30)
+            overlayHeight = height;
 
-        inputStats.push_back(
-            stat
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            overlayWidth,
+            overlayHeight,
+            SWP_NOACTIVATE
         );
     }
 }
 
 
 // ============================================================
-// RECORD TIMELINE EVENT
+// INPUT TEXT
 // ============================================================
 
-void RecordTimelineLocked(
+void WriteTimelineLine(
     const std::wstring& name
 )
 {
-    std::wstring entry =
-        GetCurrentTimeString();
+    std::wstring line =
+        GetClockTime() +
+        L"\t" +
+        name;
 
-    entry += L"\t";
-
-    entry += name;
-
-    inputTimeline.push_back(
-        entry
+    timelineLines.push_back(
+        line
     );
 }
 
 
-// ============================================================
-// RECORD PRESS
-// ============================================================
-
-void RecordInputLocked(
-    const std::wstring& name
-)
+void RewriteInputsFile()
 {
-    // Button count only counts presses.
-    RecordButtonPressLocked(
-        name
+    std::wofstream file(
+        inputsPath,
+        std::ios::trunc
     );
 
-    // Timeline records the exact Windows
-    // local clock time including milliseconds.
-    RecordTimelineLocked(
-        name
-    );
+    if (!file)
+        return;
 
-    SaveInputStats();
+    file
+        << L"=== BUTTON PRESS COUNTS ===\n\n";
+
+    for (const auto& pair : buttonCounts)
+    {
+        file
+            << pair.first
+            << L" = "
+            << pair.second
+            << L"\n";
+    }
+
+    file
+        << L"\n=== INPUT TIMELINE ===\n\n";
+
+    for (const std::wstring& line :
+         timelineLines)
+    {
+        file
+            << line
+            << L"\n";
+    }
 }
 
 
-// ============================================================
-// RECORD RELEASE
-// ============================================================
-
-void RecordReleaseLocked(
+void RecordAction(
     const std::wstring& name
 )
 {
-    RecordTimelineLocked(
+    EnterCriticalSection(
+        &actionCS
+    );
+
+    actions.push_back(
+        NowTick()
+    );
+
+    buttonCounts[name]++;
+
+    WriteTimelineLine(
+        name
+    );
+
+    RewriteInputsFile();
+
+    LeaveCriticalSection(
+        &actionCS
+    );
+}
+
+
+void RecordRelease(
+    const std::wstring& name
+)
+{
+    EnterCriticalSection(
+        &actionCS
+    );
+
+    WriteTimelineLine(
         name + L"_UP"
     );
 
-    SaveInputStats();
+    RewriteInputsFile();
+
+    LeaveCriticalSection(
+        &actionCS
+    );
 }
 
 
 // ============================================================
-// RESET APM ONLY
+// RESET
 // ============================================================
 
 void ResetAPM()
 {
     EnterCriticalSection(
-        &actionLock
+        &actionCS
     );
 
     actions.clear();
 
-    lastActionTime = 0;
-
     LeaveCriticalSection(
-        &actionLock
+        &actionCS
     );
 
     InvalidateRect(
@@ -421,29 +349,24 @@ void ResetAPM()
     );
 }
 
-
-// ============================================================
-// RESET INPUT TRACKER ONLY
-// ============================================================
 
 void ResetInputTracker()
 {
     EnterCriticalSection(
-        &actionLock
+        &actionCS
     );
 
-    inputStats.clear();
+    actions.clear();
+    buttonCounts.clear();
+    timelineLines.clear();
 
-    inputTimeline.clear();
-
-    for (int i = 0; i < 256; ++i)
-        keyRepeatCount[i] = 0;
-
-    SaveInputStats();
+    RewriteInputsFile();
 
     LeaveCriticalSection(
-        &actionLock
+        &actionCS
     );
+
+    keyRepeatCounts.clear();
 
     InvalidateRect(
         hwnd,
@@ -454,302 +377,135 @@ void ResetInputTracker()
 
 
 // ============================================================
-// REMOVE OLD APM ACTIONS
-// ============================================================
-
-void RemoveOldActionsLocked()
-{
-    const ULONGLONG now =
-        GetTickCount64();
-
-    const ULONGLONG window =
-        60000ULL;
-
-    if (
-        lastActionTime != 0 &&
-        now >= lastActionTime &&
-        now - lastActionTime >= window
-    )
-    {
-        actions.clear();
-
-        lastActionTime = 0;
-
-        return;
-    }
-
-    if (!actions.empty())
-    {
-        ULONGLONG cutoff =
-            (now >= window)
-            ? now - window
-            : 0;
-
-        auto it =
-            std::upper_bound(
-                actions.begin(),
-                actions.end(),
-                cutoff
-            );
-
-        actions.erase(
-            actions.begin(),
-            it
-        );
-    }
-
-    if (actions.empty())
-        lastActionTime = 0;
-}
-
-
-// ============================================================
-// RECORD ACTION
-// ============================================================
-
-void Action(
-    const std::wstring& inputName
-)
-{
-    ULONGLONG now =
-        GetTickCount64();
-
-    EnterCriticalSection(
-        &actionLock
-    );
-
-    RemoveOldActionsLocked();
-
-    actions.push_back(
-        now
-    );
-
-    lastActionTime = now;
-
-    RecordInputLocked(
-        inputName
-    );
-
-    LeaveCriticalSection(
-        &actionLock
-    );
-
-    InvalidateRect(
-        hwnd,
-        nullptr,
-        FALSE
-    );
-}
-
-
-// ============================================================
-// GET APM
+// APM
 // ============================================================
 
 int GetAPM()
 {
+    ULONGLONG now =
+        NowTick();
+
+    ULONGLONG cutoff =
+        now >= 60000
+        ? now - 60000
+        : 0;
+
+    int count = 0;
+
     EnterCriticalSection(
-        &actionLock
+        &actionCS
     );
 
-    RemoveOldActionsLocked();
+    while (
+        !actions.empty() &&
+        actions.front() < cutoff
+    )
+    {
+        actions.erase(
+            actions.begin()
+        );
+    }
 
-    int result =
+    count =
         static_cast<int>(
             actions.size()
         );
 
     LeaveCriticalSection(
-        &actionLock
+        &actionCS
     );
 
-    return result;
+    return count;
 }
 
 
 // ============================================================
-// KEY NAME
+// KEY NAMES
 // ============================================================
 
-std::wstring GetKeyName(
+std::wstring KeyName(
     DWORD vk
 )
 {
     switch (vk)
     {
-    case VK_SPACE:
-        return L"Space";
+        case VK_SPACE:
+            return L"Space";
 
-    case VK_RETURN:
-        return L"Enter";
+        case VK_RETURN:
+            return L"Enter";
 
-    case VK_ESCAPE:
-        return L"Esc";
+        case VK_TAB:
+            return L"Tab";
 
-    case VK_TAB:
-        return L"Tab";
+        case VK_SHIFT:
+            return L"Left Shift";
 
-    case VK_BACK:
-        return L"Backspace";
+        case VK_LSHIFT:
+            return L"Left Shift";
 
-    case VK_SHIFT:
-        return L"Shift";
+        case VK_RSHIFT:
+            return L"Right Shift";
 
-    case VK_LSHIFT:
-        return L"Left Shift";
+        case VK_CONTROL:
+            return L"Left Ctrl";
 
-    case VK_RSHIFT:
-        return L"Right Shift";
+        case VK_LCONTROL:
+            return L"Left Ctrl";
 
-    case VK_CONTROL:
-        return L"Ctrl";
+        case VK_RCONTROL:
+            return L"Right Ctrl";
 
-    case VK_LCONTROL:
-        return L"Left Ctrl";
+        case VK_MENU:
+            return L"Left Alt";
 
-    case VK_RCONTROL:
-        return L"Right Ctrl";
+        case VK_LMENU:
+            return L"Left Alt";
 
-    case VK_MENU:
-        return L"Alt";
+        case VK_RMENU:
+            return L"Right Alt";
 
-    case VK_LMENU:
-        return L"Left Alt";
+        case VK_ESCAPE:
+            return L"Esc";
 
-    case VK_RMENU:
-        return L"Right Alt";
+        case VK_BACK:
+            return L"Backspace";
 
-    case VK_CAPITAL:
-        return L"Caps Lock";
+        case VK_CAPITAL:
+            return L"Caps Lock";
 
-    case VK_INSERT:
-        return L"Insert";
+        case VK_DELETE:
+            return L"Delete";
 
-    case VK_DELETE:
-        return L"Delete";
+        case VK_INSERT:
+            return L"Insert";
 
-    case VK_HOME:
-        return L"Home";
+        case VK_HOME:
+            return L"Home";
 
-    case VK_END:
-        return L"End";
+        case VK_END:
+            return L"End";
 
-    case VK_PRIOR:
-        return L"Page Up";
+        case VK_PRIOR:
+            return L"Page Up";
 
-    case VK_NEXT:
-        return L"Page Down";
+        case VK_NEXT:
+            return L"Page Down";
 
-    case VK_LEFT:
-        return L"Left";
+        case VK_LEFT:
+            return L"Left";
 
-    case VK_RIGHT:
-        return L"Right";
+        case VK_RIGHT:
+            return L"Right";
 
-    case VK_UP:
-        return L"Up";
+        case VK_UP:
+            return L"Up";
 
-    case VK_DOWN:
-        return L"Down";
+        case VK_DOWN:
+            return L"Down";
 
-    case VK_NUMLOCK:
-        return L"Num Lock";
-
-    case VK_SCROLL:
-        return L"Scroll Lock";
-
-    case VK_LWIN:
-        return L"Left Windows";
-
-    case VK_RWIN:
-        return L"Right Windows";
-
-    case VK_APPS:
-        return L"Menu";
-
-    case VK_F1:
-        return L"F1";
-
-    case VK_F2:
-        return L"F2";
-
-    case VK_F3:
-        return L"F3";
-
-    case VK_F4:
-        return L"F4";
-
-    case VK_F5:
-        return L"F5";
-
-    case VK_F6:
-        return L"F6";
-
-    case VK_F7:
-        return L"F7";
-
-    case VK_F8:
-        return L"F8";
-
-    case VK_F9:
-        return L"F9";
-
-    case VK_F10:
-        return L"F10";
-
-    case VK_F11:
-        return L"F11";
-
-    case VK_F12:
-        return L"F12";
-
-    case VK_NUMPAD0:
-        return L"Num0";
-
-    case VK_NUMPAD1:
-        return L"Num1";
-
-    case VK_NUMPAD2:
-        return L"Num2";
-
-    case VK_NUMPAD3:
-        return L"Num3";
-
-    case VK_NUMPAD4:
-        return L"Num4";
-
-    case VK_NUMPAD5:
-        return L"Num5";
-
-    case VK_NUMPAD6:
-        return L"Num6";
-
-    case VK_NUMPAD7:
-        return L"Num7";
-
-    case VK_NUMPAD8:
-        return L"Num8";
-
-    case VK_NUMPAD9:
-        return L"Num9";
-
-    case VK_ADD:
-        return L"Num +";
-
-    case VK_SUBTRACT:
-        return L"Num -";
-
-    case VK_MULTIPLY:
-        return L"Num *";
-
-    case VK_DIVIDE:
-        return L"Num /";
-
-    case VK_DECIMAL:
-        return L"Num .";
-
-    default:
-        break;
+        default:
+            break;
     }
 
     if (
@@ -757,12 +513,15 @@ std::wstring GetKeyName(
         vk <= 'Z'
     )
     {
-        wchar_t buffer[2] = {
-            static_cast<wchar_t>(vk),
-            L'\0'
-        };
+        wchar_t c =
+            static_cast<wchar_t>(
+                vk
+            );
 
-        return buffer;
+        return std::wstring(
+            1,
+            c
+        );
     }
 
     if (
@@ -770,85 +529,26 @@ std::wstring GetKeyName(
         vk <= '9'
     )
     {
-        wchar_t buffer[2] = {
-            static_cast<wchar_t>(vk),
-            L'\0'
-        };
-
-        return buffer;
-    }
-
-    UINT scanCode =
-        MapVirtualKeyW(
-            vk,
-            MAPVK_VK_TO_VSC
-        );
-
-    LONG lParam =
-        static_cast<LONG>(
-            scanCode << 16
-        );
-
-    wchar_t buffer[128] = {};
-
-    if (
-        GetKeyNameTextW(
-            lParam,
-            buffer,
-            128
-        ) > 0
-    )
-    {
-        return buffer;
-    }
-
-    std::wstringstream ss;
-
-    ss << L"VK " << vk;
-
-    return ss.str();
-}
-
-
-// ============================================================
-// MOUSE BUTTON NAME
-// ============================================================
-
-std::wstring GetMouseButtonName(
-    WPARAM wParam
-)
-{
-    switch (wParam)
-    {
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-        return L"LMB";
-
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-        return L"RMB";
-
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-        return L"MMB";
-
-    case WM_XBUTTONDOWN:
-    case WM_XBUTTONUP:
-    {
-        WORD button =
-            GET_XBUTTON_WPARAM(
-                wParam
+        wchar_t c =
+            static_cast<wchar_t>(
+                vk
             );
 
-        if (button == XBUTTON1)
-            return L"X1";
-
-        return L"X2";
+        return std::wstring(
+            1,
+            c
+        );
     }
 
-    default:
-        return L"Mouse";
-    }
+    wchar_t buffer[32];
+
+    swprintf_s(
+        buffer,
+        L"VK_%02X",
+        vk
+    );
+
+    return buffer;
 }
 
 
@@ -857,79 +557,68 @@ std::wstring GetMouseButtonName(
 // ============================================================
 
 LRESULT CALLBACK KeyboardProc(
-    int nCode,
+    int code,
     WPARAM wParam,
     LPARAM lParam
 )
 {
-    if (nCode == HC_ACTION)
+    if (
+        code == HC_ACTION &&
+        lParam != 0
+    )
     {
-        KBDLLHOOKSTRUCT* data =
+        KBDLLHOOKSTRUCT* info =
             reinterpret_cast<KBDLLHOOKSTRUCT*>(
                 lParam
             );
 
-        if (data)
+        DWORD vk =
+            info->vkCode;
+
+        if (
+            wParam == WM_KEYDOWN ||
+            wParam == WM_SYSKEYDOWN
+        )
         {
-            if (!(data->flags & LLKHF_INJECTED))
+            if (
+                vk != VK_F8 &&
+                vk != VK_F9
+            )
             {
-                DWORD vk =
-                    data->vkCode;
+                int& repeats =
+                    keyRepeatCounts[vk];
 
-                // F8 and F9 remain ignored.
-                // F10 is a normal tracked key.
-                if (
-                    vk != VK_F8 &&
-                    vk != VK_F9 &&
-                    vk < 256
-                )
+                if (repeats < MAX_KEY_REPEATS)
                 {
-                    if (
-                        wParam == WM_KEYDOWN ||
-                        wParam == WM_SYSKEYDOWN
-                    )
-                    {
-                        if (
-                            keyRepeatCount[vk] < 5
-                        )
-                        {
-                            keyRepeatCount[vk]++;
+                    repeats++;
 
-                            Action(
-                                GetKeyName(vk)
-                            );
-                        }
-                    }
-                    else if (
-                        wParam == WM_KEYUP ||
-                        wParam == WM_SYSKEYUP
-                    )
-                    {
-                        std::wstring name =
-                            GetKeyName(vk);
-
-                        EnterCriticalSection(
-                            &actionLock
-                        );
-
-                        RecordReleaseLocked(
-                            name
-                        );
-
-                        keyRepeatCount[vk] = 0;
-
-                        LeaveCriticalSection(
-                            &actionLock
-                        );
-                    }
+                    RecordAction(
+                        KeyName(vk)
+                    );
                 }
             }
+        }
+        else if (
+            wParam == WM_KEYUP ||
+            wParam == WM_SYSKEYUP
+        )
+        {
+            std::wstring name =
+                KeyName(vk);
+
+            RecordRelease(
+                name
+            );
+
+            keyRepeatCounts.erase(
+                vk
+            );
         }
     }
 
     return CallNextHookEx(
         keyboardHook,
-        nCode,
+        code,
         wParam,
         lParam
     );
@@ -941,70 +630,110 @@ LRESULT CALLBACK KeyboardProc(
 // ============================================================
 
 LRESULT CALLBACK MouseProc(
-    int nCode,
+    int code,
     WPARAM wParam,
     LPARAM lParam
 )
 {
-    if (nCode == HC_ACTION)
+    if (
+        code == HC_ACTION &&
+        lParam != 0
+    )
     {
-        MSLLHOOKSTRUCT* data =
-            reinterpret_cast<MSLLHOOKSTRUCT*>(
-                lParam
-            );
+        std::wstring name;
 
-        if (data)
+        switch (wParam)
         {
-            if (!(data->flags & LLMHF_INJECTED))
+            case WM_LBUTTONDOWN:
+                name = L"LMB";
+                break;
+
+            case WM_RBUTTONDOWN:
+                name = L"RMB";
+                break;
+
+            case WM_MBUTTONDOWN:
+                name = L"MMB";
+                break;
+
+            case WM_XBUTTONDOWN:
             {
-                switch (wParam)
+                MSLLHOOKSTRUCT* info =
+                    reinterpret_cast<MSLLHOOKSTRUCT*>(
+                        lParam
+                    );
+
+                WORD button =
+                    HIWORD(
+                        info->mouseData
+                    );
+
+                if (
+                    button ==
+                    XBUTTON1
+                )
                 {
-                case WM_LBUTTONDOWN:
-                case WM_RBUTTONDOWN:
-                case WM_MBUTTONDOWN:
-                case WM_XBUTTONDOWN:
-
-                    Action(
-                        GetMouseButtonName(
-                            wParam
-                        )
-                    );
-
-                    break;
-
-
-                case WM_LBUTTONUP:
-                case WM_RBUTTONUP:
-                case WM_MBUTTONUP:
-                case WM_XBUTTONUP:
+                    name = L"X1";
+                }
+                else
                 {
-                    std::wstring name =
-                        GetMouseButtonName(
-                            wParam
-                        );
-
-                    EnterCriticalSection(
-                        &actionLock
-                    );
-
-                    RecordReleaseLocked(
-                        name
-                    );
-
-                    LeaveCriticalSection(
-                        &actionLock
-                    );
-
-                    break;
+                    name = L"X2";
                 }
-                }
+
+                break;
             }
+
+            case WM_LBUTTONUP:
+                RecordRelease(L"LMB");
+                break;
+
+            case WM_RBUTTONUP:
+                RecordRelease(L"RMB");
+                break;
+
+            case WM_MBUTTONUP:
+                RecordRelease(L"MMB");
+                break;
+
+            case WM_XBUTTONUP:
+            {
+                MSLLHOOKSTRUCT* info =
+                    reinterpret_cast<MSLLHOOKSTRUCT*>(
+                        lParam
+                    );
+
+                WORD button =
+                    HIWORD(
+                        info->mouseData
+                    );
+
+                if (
+                    button ==
+                    XBUTTON1
+                )
+                {
+                    RecordRelease(L"X1");
+                }
+                else
+                {
+                    RecordRelease(L"X2");
+                }
+
+                break;
+            }
+        }
+
+        if (!name.empty())
+        {
+            RecordAction(
+                name
+            );
         }
     }
 
     return CallNextHookEx(
         mouseHook,
-        nCode,
+        code,
         wParam,
         lParam
     );
@@ -1012,400 +741,148 @@ LRESULT CALLBACK MouseProc(
 
 
 // ============================================================
-// DRAW TEXT
+// TRAY
 // ============================================================
 
-void DrawStyledText(
-    HDC dc,
-    const std::wstring& text,
-    int x,
-    int y,
-    int fontHeight
-)
+void AddTrayIcon()
 {
-    HFONT font =
-        CreateFontW(
-            -fontHeight * RENDER_SCALE,
-            0,
-            0,
-            0,
-            FW_BOLD,
-            FALSE,
-            FALSE,
-            FALSE,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
-            DEFAULT_PITCH,
-            L"Arial Narrow"
+    NOTIFYICONDATAW nid{};
+
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID = 1;
+
+    nid.uFlags =
+        NIF_ICON |
+        NIF_MESSAGE |
+        NIF_TIP;
+
+    nid.uCallbackMessage =
+        WM_TRAYICON;
+
+    nid.hIcon =
+        LoadIconW(
+            nullptr,
+            IDI_APPLICATION
         );
 
-    HFONT oldFont =
-        static_cast<HFONT>(
-            SelectObject(
-                dc,
-                font
-            )
-        );
-
-    SetBkMode(
-        dc,
-        TRANSPARENT
+    wcscpy_s(
+        nid.szTip,
+        L"APM Overlay"
     );
 
-    // Dark outline.
-    SetTextColor(
-        dc,
-        RGB(0, 0, 0)
+    Shell_NotifyIconW(
+        NIM_ADD,
+        &nid
+    );
+}
+
+
+void RemoveTrayIcon()
+{
+    NOTIFYICONDATAW nid{};
+
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID = 1;
+
+    Shell_NotifyIconW(
+        NIM_DELETE,
+        &nid
+    );
+}
+
+
+void ShowTrayMenu()
+{
+    HMENU menu =
+        CreatePopupMenu();
+
+    if (!menu)
+        return;
+
+    AppendMenuW(
+        menu,
+        MF_STRING |
+        (
+            clickableMode
+            ? MF_CHECKED
+            : 0
+        ),
+        ID_TRAY_CLICKABLE,
+        clickableMode
+            ? L"Pass-through Mode"
+            : L"Clickable Mode"
     );
 
-    for (int ox = -2; ox <= 2; ++ox)
-    {
-        for (int oy = -2; oy <= 2; ++oy)
-        {
-            TextOutW(
-                dc,
-                x + ox,
-                y + oy,
-                text.c_str(),
-                static_cast<int>(
-                    text.length()
-                )
-            );
-        }
-    }
-
-    // Main text.
-    SetTextColor(
-        dc,
-        RGB(255, 255, 255)
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ID_TRAY_RESET_APM,
+        L"Reset APM"
     );
 
-    TextOutW(
-        dc,
-        x,
-        y,
-        text.c_str(),
-        static_cast<int>(
-            text.length()
-        )
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ID_TRAY_RESET_INPUT,
+        L"Reset Input Tracker"
     );
 
-    SelectObject(
-        dc,
-        oldFont
+    AppendMenuW(
+        menu,
+        MF_SEPARATOR,
+        0,
+        nullptr
     );
 
-    DeleteObject(
-        font
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ID_TRAY_EXIT,
+        L"Exit"
+    );
+
+    POINT pt;
+
+    GetCursorPos(
+        &pt
+    );
+
+    SetForegroundWindow(
+        hwnd
+    );
+
+    TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON,
+        pt.x,
+        pt.y,
+        0,
+        hwnd,
+        nullptr
+    );
+
+    DestroyMenu(
+        menu
     );
 }
 
 
 // ============================================================
-// DRAW OVERLAY
+// WINDOW STYLE
 // ============================================================
 
-void DrawOverlay(
-    HDC targetDC
-)
+void ApplyMode()
 {
-    int width =
-        overlayWidth;
-
-    int height =
-        overlayHeight;
-
-    if (
-        width <= 0 ||
-        height <= 0
-    )
-        return;
-
-    int scaledWidth =
-        width * RENDER_SCALE;
-
-    int scaledHeight =
-        height * RENDER_SCALE;
-
-    HDC highDC =
-        CreateCompatibleDC(
-            targetDC
-        );
-
-    BITMAPINFO bmi = {};
-
-    bmi.bmiHeader.biSize =
-        sizeof(BITMAPINFOHEADER);
-
-    bmi.bmiHeader.biWidth =
-        scaledWidth;
-
-    bmi.bmiHeader.biHeight =
-        -scaledHeight;
-
-    bmi.bmiHeader.biPlanes =
-        1;
-
-    bmi.bmiHeader.biBitCount =
-        32;
-
-    bmi.bmiHeader.biCompression =
-        BI_RGB;
-
-    void* bits = nullptr;
-
-    HBITMAP bitmap =
-        CreateDIBSection(
-            targetDC,
-            &bmi,
-            DIB_RGB_COLORS,
-            &bits,
-            nullptr,
-            0
-        );
-
-    if (!bitmap)
-    {
-        DeleteDC(highDC);
-        return;
-    }
-
-    HBITMAP oldBitmap =
-        static_cast<HBITMAP>(
-            SelectObject(
-                highDC,
-                bitmap
-            )
-        );
-
-    RECT highRect = {
-        0,
-        0,
-        scaledWidth,
-        scaledHeight
-    };
-
-    HBRUSH background =
-        CreateSolidBrush(
-            RGB(0, 0, 0)
-        );
-
-    FillRect(
-        highDC,
-        &highRect,
-        background
-    );
-
-    DeleteObject(
-        background
-    );
-
-    int apm =
-        GetAPM();
-
-    std::wstring text =
-        L"APM " +
-        std::to_wstring(
-            apm
-        );
-
-    int fontHeight =
-        static_cast<int>(
-            height * 0.62
-        );
-
-    if (fontHeight < 10)
-        fontHeight = 10;
-
-    DrawStyledText(
-        highDC,
-        text,
-        8 * RENDER_SCALE,
-        2 * RENDER_SCALE,
-        fontHeight
-    );
-
-    HDC finalDC =
-        CreateCompatibleDC(
-            targetDC
-        );
-
-    BITMAPINFO finalBmi = {};
-
-    finalBmi.bmiHeader.biSize =
-        sizeof(BITMAPINFOHEADER);
-
-    finalBmi.bmiHeader.biWidth =
-        width;
-
-    finalBmi.bmiHeader.biHeight =
-        -height;
-
-    finalBmi.bmiHeader.biPlanes =
-        1;
-
-    finalBmi.bmiHeader.biBitCount =
-        32;
-
-    finalBmi.bmiHeader.biCompression =
-        BI_RGB;
-
-    void* finalBits = nullptr;
-
-    HBITMAP finalBitmap =
-        CreateDIBSection(
-            targetDC,
-            &finalBmi,
-            DIB_RGB_COLORS,
-            &finalBits,
-            nullptr,
-            0
-        );
-
-    if (finalBitmap)
-    {
-        HBITMAP oldFinal =
-            static_cast<HBITMAP>(
-                SelectObject(
-                    finalDC,
-                    finalBitmap
-                )
-            );
-
-        BYTE* src =
-            static_cast<BYTE*>(
-                bits
-            );
-
-        BYTE* dst =
-            static_cast<BYTE*>(
-                finalBits
-            );
-
-        for (int y = 0; y < height; ++y)
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                int sx =
-                    x * RENDER_SCALE;
-
-                int sy =
-                    y * RENDER_SCALE;
-
-                unsigned int b = 0;
-                unsigned int g = 0;
-                unsigned int r = 0;
-
-                for (
-                    int yy = 0;
-                    yy < RENDER_SCALE;
-                    ++yy
-                )
-                {
-                    for (
-                        int xx = 0;
-                        xx < RENDER_SCALE;
-                        ++xx
-                    )
-                    {
-                        BYTE* pixel =
-                            src +
-                            (
-                                (sy + yy) *
-                                scaledWidth +
-                                (sx + xx)
-                            ) * 4;
-
-                        b += pixel[0];
-                        g += pixel[1];
-                        r += pixel[2];
-                    }
-                }
-
-                int samples =
-                    RENDER_SCALE *
-                    RENDER_SCALE;
-
-                BYTE* out =
-                    dst +
-                    (
-                        (y * width + x)
-                        * 4
-                    );
-
-                out[0] =
-                    static_cast<BYTE>(
-                        b / samples
-                    );
-
-                out[1] =
-                    static_cast<BYTE>(
-                        g / samples
-                    );
-
-                out[2] =
-                    static_cast<BYTE>(
-                        r / samples
-                    );
-
-                out[3] = 255;
-            }
-        }
-
-        BitBlt(
-            targetDC,
-            0,
-            0,
-            width,
-            height,
-            finalDC,
-            0,
-            0,
-            SRCCOPY
-        );
-
-        SelectObject(
-            finalDC,
-            oldFinal
-        );
-
-        DeleteObject(
-            finalBitmap
-        );
-    }
-
-    DeleteDC(
-        finalDC
-    );
-
-    SelectObject(
-        highDC,
-        oldBitmap
-    );
-
-    DeleteObject(
-        bitmap
-    );
-
-    DeleteDC(
-        highDC
-    );
-}
-
-
-// ============================================================
-// CLICKABLE MODE
-// ============================================================
-
-void SetClickableMode(
-    bool clickable
-)
-{
-    clickableMode =
-        clickable;
-
     LONG_PTR style =
         GetWindowLongPtrW(
             hwnd,
@@ -1424,6 +901,9 @@ void SetClickableMode(
 
         exStyle &=
             ~WS_EX_TRANSPARENT;
+
+        exStyle &=
+            ~WS_EX_NOACTIVATE;
     }
     else
     {
@@ -1432,12 +912,10 @@ void SetClickableMode(
 
         exStyle |=
             WS_EX_TRANSPARENT;
-    }
 
-    exStyle |=
-        WS_EX_LAYERED |
-        WS_EX_TOPMOST |
-        WS_EX_TOOLWINDOW;
+        exStyle |=
+            WS_EX_NOACTIVATE;
+    }
 
     SetWindowLongPtrW(
         hwnd,
@@ -1454,13 +932,14 @@ void SetClickableMode(
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
-        overlayX,
-        overlayY,
-        overlayWidth,
-        overlayHeight,
-        SWP_FRAMECHANGED |
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE |
+        SWP_NOSIZE |
         SWP_NOACTIVATE |
-        SWP_SHOWWINDOW
+        SWP_FRAMECHANGED
     );
 
     InvalidateRect(
@@ -1471,140 +950,209 @@ void SetClickableMode(
 }
 
 
-// ============================================================
-// TRAY ICON
-// ============================================================
-
-void AddTrayIcon()
+void ToggleClickable()
 {
-    NOTIFYICONDATAW nid = {};
+    clickableMode =
+        !clickableMode;
 
-    nid.cbSize =
-        sizeof(nid);
+    ApplyMode();
+}
 
-    nid.hWnd =
-        hwnd;
 
-    nid.uID = 1;
+// ============================================================
+// PAINT
+// ============================================================
 
-    nid.uFlags =
-        NIF_MESSAGE |
-        NIF_ICON |
-        NIF_TIP;
+HFONT CreateOverlayFont(
+    int height
+)
+{
+    return CreateFontW(
+        -height,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY,
+        L"Arial"
+    );
+}
 
-    nid.uCallbackMessage =
-        WM_TRAYICON;
 
-    nid.hIcon =
-        LoadIconW(
-            nullptr,
-            IDI_APPLICATION
+void PaintOverlay(
+    HDC hdc,
+    RECT& rc
+)
+{
+    int width =
+        rc.right -
+        rc.left;
+
+    int height =
+        rc.bottom -
+        rc.top;
+
+    SetBkMode(
+        hdc,
+        TRANSPARENT
+    );
+
+    HFONT font =
+        CreateOverlayFont(
+            max(
+                18,
+                height - 12
+            )
         );
 
-    lstrcpyW(
-        nid.szTip,
-        L"APM Overlay"
+    HFONT oldFont =
+        (HFONT)SelectObject(
+            hdc,
+            font
+        );
+
+    wchar_t text[64];
+
+    swprintf_s(
+        text,
+        L"APM %d",
+        GetAPM()
     );
 
-    Shell_NotifyIconW(
-        NIM_ADD,
-        &nid
+    RECT textRect = rc;
+
+    if (clickableMode)
+    {
+        textRect.top += 6;
+    }
+
+    SetTextColor(
+        hdc,
+        RGB(
+            255,
+            255,
+            255
+        )
     );
-}
 
+    DrawTextW(
+        hdc,
+        text,
+        -1,
+        &textRect,
+        DT_CENTER |
+        DT_VCENTER |
+        DT_SINGLELINE
+    );
 
-void RemoveTrayIcon()
-{
-    NOTIFYICONDATAW nid = {};
+    if (clickableMode)
+    {
+        RECT bar{
+            0,
+            0,
+            width,
+            6
+        };
 
-    nid.cbSize =
-        sizeof(nid);
+        HBRUSH white =
+            CreateSolidBrush(
+                RGB(
+                    255,
+                    255,
+                    255
+                )
+            );
 
-    nid.hWnd =
-        hwnd;
+        FillRect(
+            hdc,
+            &bar,
+            white
+        );
 
-    nid.uID = 1;
+        DeleteObject(
+            white
+        );
+    }
 
-    Shell_NotifyIconW(
-        NIM_DELETE,
-        &nid
+    SelectObject(
+        hdc,
+        oldFont
+    );
+
+    DeleteObject(
+        font
     );
 }
 
 
 // ============================================================
-// TRAY MENU
+// HIT TEST
 // ============================================================
 
-void ShowTrayMenu()
+LRESULT HandleHitTest(
+    LPARAM lParam
+)
 {
-    HMENU menu =
-        CreatePopupMenu();
+    if (!clickableMode)
+        return HTTRANSPARENT;
 
-    if (!menu)
-        return;
+    POINT pt{
+        GET_X_LPARAM(lParam),
+        GET_Y_LPARAM(lParam)
+    };
 
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        ID_TRAY_CLICK,
-        clickableMode
-            ? L"Pass-through Mode"
-            : L"Clickable Mode"
-    );
+    RECT rc;
 
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        ID_TRAY_RESET,
-        L"Reset APM"
-    );
-
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        ID_TRAY_INPUT,
-        L"Reset Input Tracker"
-    );
-
-    AppendMenuW(
-        menu,
-        MF_SEPARATOR,
-        0,
-        nullptr
-    );
-
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        ID_TRAY_EXIT,
-        L"Exit"
-    );
-
-    POINT point;
-
-    GetCursorPos(
-        &point
-    );
-
-    SetForegroundWindow(
-        hwnd
-    );
-
-    TrackPopupMenu(
-        menu,
-        TPM_RIGHTBUTTON |
-        TPM_BOTTOMALIGN,
-        point.x,
-        point.y,
-        0,
+    GetClientRect(
         hwnd,
-        nullptr
+        &rc
     );
 
-    DestroyMenu(
-        menu
-    );
+    const int grip = 8;
+
+    bool left =
+        pt.x < grip;
+
+    bool right =
+        pt.x >= rc.right - grip;
+
+    bool top =
+        pt.y < grip;
+
+    bool bottom =
+        pt.y >= rc.bottom - grip;
+
+    if (top && left)
+        return HTTOPLEFT;
+
+    if (top && right)
+        return HTTOPRIGHT;
+
+    if (bottom && left)
+        return HTBOTTOMLEFT;
+
+    if (bottom && right)
+        return HTBOTTOMRIGHT;
+
+    if (left)
+        return HTLEFT;
+
+    if (right)
+        return HTRIGHT;
+
+    if (top)
+        return HTTOP;
+
+    if (bottom)
+        return HTBOTTOM;
+
+    return HTCAPTION;
 }
 
 
@@ -1613,298 +1161,181 @@ void ShowTrayMenu()
 // ============================================================
 
 LRESULT CALLBACK WndProc(
-    HWND window,
-    UINT message,
+    HWND hWnd,
+    UINT msg,
     WPARAM wParam,
     LPARAM lParam
 )
 {
-    switch (message)
+    switch (msg)
     {
-    case WM_TRAYICON:
-
-        if (
-            lParam == WM_RBUTTONUP ||
-            lParam == WM_CONTEXTMENU
-        )
-        {
-            ShowTrayMenu();
-        }
-
-        return 0;
-
-
-    case WM_COMMAND:
-
-        switch (LOWORD(wParam))
-        {
-        case ID_TRAY_CLICK:
-
-            SetClickableMode(
-                !clickableMode
+        case WM_NCHITTEST:
+            return HandleHitTest(
+                lParam
             );
 
-            return 0;
-
-
-        case ID_TRAY_RESET:
-
-            // APM ONLY.
-            ResetAPM();
-
-            return 0;
-
-
-        case ID_TRAY_INPUT:
-
-            // INPUT TRACKER ONLY.
-            ResetInputTracker();
-
-            return 0;
-
-
-        case ID_TRAY_EXIT:
-
-            DestroyWindow(
-                hwnd
-            );
-
-            return 0;
-        }
-
-        break;
-
-
-    case WM_NCHITTEST:
-
-        if (!clickableMode)
-            return HTTRANSPARENT;
-
+        case WM_PAINT:
         {
-            POINT pt = {
-                GET_X_LPARAM(lParam),
-                GET_Y_LPARAM(lParam)
-            };
+            PAINTSTRUCT ps;
 
-            ScreenToClient(
-                window,
-                &pt
-            );
+            HDC hdc =
+                BeginPaint(
+                    hWnd,
+                    &ps
+                );
 
-            RECT rect;
+            RECT rc;
 
             GetClientRect(
-                window,
-                &rect
+                hWnd,
+                &rc
             );
-
-            const int grip = 8;
-
-            bool left =
-                pt.x <= grip;
-
-            bool right =
-                pt.x >=
-                rect.right - grip;
-
-            bool top =
-                pt.y <= grip;
-
-            bool bottom =
-                pt.y >=
-                rect.bottom - grip;
-
-            if (top && left)
-                return HTTOPLEFT;
-
-            if (top && right)
-                return HTTOPRIGHT;
-
-            if (bottom && left)
-                return HTBOTTOMLEFT;
-
-            if (bottom && right)
-                return HTBOTTOMRIGHT;
-
-            if (left)
-                return HTLEFT;
-
-            if (right)
-                return HTRIGHT;
-
-            if (top)
-                return HTCAPTION;
-
-            if (bottom)
-                return HTBOTTOM;
-
-            return HTCLIENT;
-        }
-
-
-    case WM_MOVE:
-
-        overlayX =
-            static_cast<int>(
-                static_cast<short>(
-                    LOWORD(lParam)
-                )
-            );
-
-        overlayY =
-            static_cast<int>(
-                static_cast<short>(
-                    HIWORD(lParam)
-                )
-            );
-
-        SaveSettings();
-
-        return 0;
-
-
-    case WM_SIZE:
-
-        if (
-            wParam != SIZE_MINIMIZED
-        )
-        {
-            overlayWidth =
-                LOWORD(lParam);
-
-            overlayHeight =
-                HIWORD(lParam);
-
-            if (overlayWidth < 50)
-                overlayWidth = 50;
-
-            if (overlayHeight < 20)
-                overlayHeight = 20;
-
-            SaveSettings();
-        }
-
-        return 0;
-
-
-    case WM_TIMER:
-
-        if (wParam == 1)
-        {
-            EnterCriticalSection(
-                &actionLock
-            );
-
-            RemoveOldActionsLocked();
-
-            LeaveCriticalSection(
-                &actionLock
-            );
-
-            InvalidateRect(
-                window,
-                nullptr,
-                FALSE
-            );
-        }
-
-        return 0;
-
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-
-        HDC dc =
-            BeginPaint(
-                window,
-                &ps
-            );
-
-        DrawOverlay(
-            dc
-        );
-
-        if (clickableMode)
-        {
-            RECT bar = {
-                0,
-                0,
-                overlayWidth,
-                TOP_BAR_HEIGHT
-            };
 
             HBRUSH brush =
                 CreateSolidBrush(
-                    RGB(255, 255, 255)
+                    RGB(
+                        0,
+                        0,
+                        0
+                    )
                 );
 
             FillRect(
-                dc,
-                &bar,
+                hdc,
+                &rc,
                 brush
             );
 
             DeleteObject(
                 brush
             );
-        }
 
-        EndPaint(
-            window,
-            &ps
-        );
-
-        return 0;
-    }
-
-
-    case WM_ERASEBKGND:
-
-        return 1;
-
-
-    case WM_DESTROY:
-
-        SaveSettings();
-
-        SaveInputStats();
-
-        KillTimer(
-            window,
-            1
-        );
-
-        if (keyboardHook)
-        {
-            UnhookWindowsHookEx(
-                keyboardHook
+            PaintOverlay(
+                hdc,
+                rc
             );
 
-            keyboardHook = nullptr;
-        }
-
-        if (mouseHook)
-        {
-            UnhookWindowsHookEx(
-                mouseHook
+            EndPaint(
+                hWnd,
+                &ps
             );
 
-            mouseHook = nullptr;
+            return 0;
         }
 
-        RemoveTrayIcon();
+        case WM_TIMER:
+        {
+            if (wParam == 1)
+            {
+                InvalidateRect(
+                    hWnd,
+                    nullptr,
+                    FALSE
+                );
+            }
 
-        PostQuitMessage(
-            0
-        );
+            return 0;
+        }
 
-        return 0;
+        case WM_MOVING:
+        case WM_SIZING:
+        {
+            SaveWindowSettings();
+            return TRUE;
+        }
+
+        case WM_EXITSIZEMOVE:
+        {
+            SaveWindowSettings();
+            return 0;
+        }
+
+        case WM_TRAYICON:
+        {
+            if (
+                lParam == WM_RBUTTONUP ||
+                lParam == WM_CONTEXTMENU
+            )
+            {
+                ShowTrayMenu();
+            }
+
+            return 0;
+        }
+
+        case WM_COMMAND:
+        {
+            switch (LOWORD(wParam))
+            {
+                case ID_TRAY_CLICKABLE:
+                    ToggleClickable();
+                    break;
+
+                case ID_TRAY_RESET_APM:
+                    ResetAPM();
+                    break;
+
+                case ID_TRAY_RESET_INPUT:
+                    ResetInputTracker();
+                    break;
+
+                case ID_TRAY_EXIT:
+                    DestroyWindow(
+                        hWnd
+                    );
+                    break;
+            }
+
+            return 0;
+        }
+
+        case WM_CLOSE:
+            SaveWindowSettings();
+
+            DestroyWindow(
+                hWnd
+            );
+
+            return 0;
+
+        case WM_DESTROY:
+            RemoveTrayIcon();
+
+            if (keyboardHook)
+            {
+                UnhookWindowsHookEx(
+                    keyboardHook
+                );
+
+                keyboardHook =
+                    nullptr;
+            }
+
+            if (mouseHook)
+            {
+                UnhookWindowsHookEx(
+                    mouseHook
+                );
+
+                mouseHook =
+                    nullptr;
+            }
+
+            KillTimer(
+                hWnd,
+                1
+            );
+
+            PostQuitMessage(
+                0
+            );
+
+            return 0;
     }
 
     return DefWindowProcW(
-        window,
-        message,
+        hWnd,
+        msg,
         wParam,
         lParam
     );
@@ -1912,35 +1343,44 @@ LRESULT CALLBACK WndProc(
 
 
 // ============================================================
-// WINMAIN
+// ENTRY POINT
 // ============================================================
 
-int WINAPI WinMain(
+int WINAPI wWinMain(
     HINSTANCE hInstance,
     HINSTANCE,
-    LPSTR,
+    PWSTR,
     int
 )
 {
     InitializeCriticalSection(
-        &actionLock
+        &actionCS
     );
 
-    LoadSettings();
+    std::wstring exeDir =
+        GetExeDirectory();
 
-    const wchar_t CLASS_NAME[] =
-        L"APMOverlayWindow";
+    settingsPath =
+        exeDir +
+        L"\\APMOverlay.txt";
 
-    WNDCLASSW wc = {};
+    inputsPath =
+        exeDir +
+        L"\\Inputs.txt";
 
-    wc.lpfnWndProc =
-        WndProc;
+    WNDCLASSEXW wc{};
+
+    wc.cbSize =
+        sizeof(wc);
 
     wc.hInstance =
         hInstance;
 
+    wc.lpfnWndProc =
+        WndProc;
+
     wc.lpszClassName =
-        CLASS_NAME;
+        L"APMOverlayWindow";
 
     wc.hCursor =
         LoadCursorW(
@@ -1951,21 +1391,24 @@ int WINAPI WinMain(
     wc.hbrBackground =
         nullptr;
 
-    RegisterClassW(
+    RegisterClassExW(
         &wc
     );
 
+    DWORD exStyle =
+        WS_EX_LAYERED |
+        WS_EX_TRANSPARENT |
+        WS_EX_NOACTIVATE;
+
     hwnd =
         CreateWindowExW(
-            WS_EX_LAYERED |
-            WS_EX_TOPMOST |
-            WS_EX_TOOLWINDOW |
-            WS_EX_TRANSPARENT,
-            CLASS_NAME,
+            exStyle,
+            wc.lpszClassName,
             L"APM Overlay",
-            WS_POPUP,
-            overlayX,
-            overlayY,
+            WS_POPUP |
+            WS_THICKFRAME,
+            20,
+            20,
             overlayWidth,
             overlayHeight,
             nullptr,
@@ -1977,7 +1420,7 @@ int WINAPI WinMain(
     if (!hwnd)
     {
         DeleteCriticalSection(
-            &actionLock
+            &actionCS
         );
 
         return 1;
@@ -1985,12 +1428,36 @@ int WINAPI WinMain(
 
     SetLayeredWindowAttributes(
         hwnd,
-        RGB(0, 0, 0),
-        0,
+        RGB(
+            0,
+            0,
+            0
+        ),
+        255,
         LWA_COLORKEY
     );
 
+    LoadWindowSettings();
+
+    ApplyMode();
+
+    ShowWindow(
+        hwnd,
+        SW_SHOWNOACTIVATE
+    );
+
+    UpdateWindow(
+        hwnd
+    );
+
     AddTrayIcon();
+
+    SetTimer(
+        hwnd,
+        1,
+        REFRESH_MS,
+        nullptr
+    );
 
     keyboardHook =
         SetWindowsHookExW(
@@ -2008,27 +1475,16 @@ int WINAPI WinMain(
             0
         );
 
-    // Start in pass-through mode.
-    SetClickableMode(
-        false
-    );
-
-    // Update APM once per second.
-    SetTimer(
-        hwnd,
-        1,
-        1000,
-        nullptr
-    );
-
-    ShowWindow(
-        hwnd,
-        SW_SHOWNOACTIVATE
-    );
-
-    UpdateWindow(
-        hwnd
-    );
+    if (!keyboardHook ||
+        !mouseHook)
+    {
+        MessageBoxW(
+            nullptr,
+            L"Could not install the input hooks.",
+            L"APM Overlay",
+            MB_ICONERROR
+        );
+    }
 
     MSG msg;
 
@@ -2051,7 +1507,7 @@ int WINAPI WinMain(
     }
 
     DeleteCriticalSection(
-        &actionLock
+        &actionCS
     );
 
     return 0;
