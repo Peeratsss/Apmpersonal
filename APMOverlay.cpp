@@ -34,15 +34,15 @@ static int overlayHeight = 45;
 
 static const int TOP_BAR_HEIGHT = 6;
 
+// 2x supersampling for smoother text.
+static const int RENDER_SCALE = 2;
+
 static CRITICAL_SECTION actionLock;
 
 static std::vector<ULONGLONG> actions;
 
-// Used to guarantee APM reaches 0 after 60 seconds
-// without any input.
 static ULONGLONG lastActionTime = 0;
 
-// Maximum of 5 keydown events per held key.
 static BYTE keyRepeatCount[256] = { 0 };
 
 // ============================================================
@@ -95,7 +95,7 @@ std::wstring GetInputStatsPath()
 }
 
 // ============================================================
-// SAVE / LOAD WINDOW SETTINGS
+// SETTINGS
 // ============================================================
 
 void SaveSettings()
@@ -266,13 +266,8 @@ void RemoveOldActionsLocked()
     const ULONGLONG window =
         60000ULL;
 
-    // --------------------------------------------------------
-    // HARD ZERO FIX
-    //
-    // If absolutely no input happened for 60 seconds,
-    // there cannot be anything left in the APM window.
-    // --------------------------------------------------------
-
+    // If no input happened for 60 seconds,
+    // APM must be zero.
     if (
         lastActionTime != 0 &&
         now >= lastActionTime &&
@@ -285,10 +280,6 @@ void RemoveOldActionsLocked()
 
         return;
     }
-
-    // --------------------------------------------------------
-    // Remove actions 60 seconds old or older.
-    // --------------------------------------------------------
 
     if (!actions.empty())
     {
@@ -397,7 +388,7 @@ void ResetAPM()
 }
 
 // ============================================================
-// GET KEY NAME
+// KEY NAME
 // ============================================================
 
 std::wstring GetKeyName(
@@ -611,7 +602,6 @@ std::wstring GetKeyName(
             return L"'";
     }
 
-    // A-Z
     if (
         vkCode >= 'A' &&
         vkCode <= 'Z'
@@ -627,7 +617,6 @@ std::wstring GetKeyName(
         return buffer;
     }
 
-    // 0-9
     if (
         vkCode >= '0' &&
         vkCode <= '9'
@@ -643,7 +632,6 @@ std::wstring GetKeyName(
         return buffer;
     }
 
-    // Fallback
     wchar_t name[64] = {};
 
     UINT scanCode =
@@ -701,7 +689,6 @@ LRESULT CALLBACK KeyboardHookProc(
             DWORD vk =
                 kb->vkCode;
 
-            // Ignore F8 and F9.
             if (
                 vk != VK_F8 &&
                 vk != VK_F9 &&
@@ -713,7 +700,6 @@ LRESULT CALLBACK KeyboardHookProc(
                     wParam == WM_SYSKEYDOWN
                 )
                 {
-                    // First keydown + maximum 5 repeats.
                     if (
                         keyRepeatCount[vk] < 5
                     )
@@ -830,15 +816,19 @@ LRESULT CALLBACK MouseHookProc(
 void DrawStyledText(
     HDC dc,
     const std::wstring& text,
-    RECT rect
+    RECT rect,
+    int scale
 )
 {
-    const int outline = 2;
-    const int shadow = 2;
+    const int outline =
+        2 * scale;
+
+    const int shadow =
+        2 * scale;
 
     SetTextCharacterExtra(
         dc,
-        1
+        1 * scale
     );
 
     SetBkMode(
@@ -852,7 +842,8 @@ void DrawStyledText(
         RGB(0, 0, 0)
     );
 
-    RECT shadowRect = rect;
+    RECT shadowRect =
+        rect;
 
     shadowRect.left += shadow;
     shadowRect.top += shadow;
@@ -878,14 +869,14 @@ void DrawStyledText(
 
     const int offsets[][2] =
     {
-        {-outline, -outline},
-        {0, -outline},
-        {outline, -outline},
-        {-outline, 0},
-        {outline, 0},
-        {-outline, outline},
-        {0, outline},
-        {outline, outline}
+        {-1, -1},
+        { 0, -1},
+        { 1, -1},
+        {-1,  0},
+        { 1,  0},
+        {-1,  1},
+        { 0,  1},
+        { 1,  1}
     };
 
     for (
@@ -893,19 +884,20 @@ void DrawStyledText(
         offsets
     )
     {
-        RECT outlineRect = rect;
+        RECT outlineRect =
+            rect;
 
         outlineRect.left +=
-            offset[0];
+            offset[0] * scale;
 
         outlineRect.top +=
-            offset[1];
+            offset[1] * scale;
 
         outlineRect.right +=
-            offset[0];
+            offset[0] * scale;
 
         outlineRect.bottom +=
-            offset[1];
+            offset[1] * scale;
 
         DrawTextW(
             dc,
@@ -922,7 +914,7 @@ void DrawStyledText(
     // Main text
     SetTextColor(
         dc,
-        RGB(245, 245, 245)
+        RGB(255, 255, 255)
     );
 
     DrawTextW(
@@ -977,84 +969,173 @@ void DrawOverlay()
         windowRect.bottom -
         windowRect.top;
 
-    if (overlayWidth <= 0 ||
-        overlayHeight <= 0)
+    if (
+        overlayWidth <= 0 ||
+        overlayHeight <= 0
+    )
     {
         return;
     }
+
+    // ========================================================
+    // HIGH-RES RENDER SIZE
+    // ========================================================
+
+    const int renderWidth =
+        overlayWidth *
+        RENDER_SCALE;
+
+    const int renderHeight =
+        overlayHeight *
+        RENDER_SCALE;
 
     HDC screenDC =
         GetDC(nullptr);
 
-    HDC memDC =
+    HDC renderDC =
         CreateCompatibleDC(
             screenDC
         );
 
-    BITMAPINFO bmi = {};
+    HDC finalDC =
+        CreateCompatibleDC(
+            screenDC
+        );
 
-    bmi.bmiHeader.biSize =
+    // ========================================================
+    // HIGH-RES BITMAP
+    // ========================================================
+
+    BITMAPINFO renderInfo = {};
+
+    renderInfo.bmiHeader.biSize =
         sizeof(BITMAPINFOHEADER);
 
-    bmi.bmiHeader.biWidth =
-        overlayWidth;
+    renderInfo.bmiHeader.biWidth =
+        renderWidth;
 
-    bmi.bmiHeader.biHeight =
-        -overlayHeight;
+    renderInfo.bmiHeader.biHeight =
+        -renderHeight;
 
-    bmi.bmiHeader.biPlanes =
+    renderInfo.bmiHeader.biPlanes =
         1;
 
-    bmi.bmiHeader.biBitCount =
+    renderInfo.bmiHeader.biBitCount =
         32;
 
-    bmi.bmiHeader.biCompression =
+    renderInfo.bmiHeader.biCompression =
         BI_RGB;
 
-    void* bits = nullptr;
+    void* renderBits =
+        nullptr;
 
-    HBITMAP bitmap =
+    HBITMAP renderBitmap =
         CreateDIBSection(
-            memDC,
-            &bmi,
+            renderDC,
+            &renderInfo,
             DIB_RGB_COLORS,
-            &bits,
+            &renderBits,
             nullptr,
             0
         );
 
-    if (!bitmap)
+    if (!renderBitmap)
     {
-        DeleteDC(memDC);
+        DeleteDC(renderDC);
+        DeleteDC(finalDC);
         ReleaseDC(nullptr, screenDC);
         return;
     }
 
-    HBITMAP oldBitmap =
+    HBITMAP oldRenderBitmap =
         (HBITMAP)SelectObject(
-            memDC,
-            bitmap
+            renderDC,
+            renderBitmap
         );
 
-    // Transparent background.
-    RECT fullRect =
+    // ========================================================
+    // FINAL-SIZE BITMAP
+    // ========================================================
+
+    BITMAPINFO finalInfo = {};
+
+    finalInfo.bmiHeader.biSize =
+        sizeof(BITMAPINFOHEADER);
+
+    finalInfo.bmiHeader.biWidth =
+        overlayWidth;
+
+    finalInfo.bmiHeader.biHeight =
+        -overlayHeight;
+
+    finalInfo.bmiHeader.biPlanes =
+        1;
+
+    finalInfo.bmiHeader.biBitCount =
+        32;
+
+    finalInfo.bmiHeader.biCompression =
+        BI_RGB;
+
+    void* finalBits =
+        nullptr;
+
+    HBITMAP finalBitmap =
+        CreateDIBSection(
+            finalDC,
+            &finalInfo,
+            DIB_RGB_COLORS,
+            &finalBits,
+            nullptr,
+            0
+        );
+
+    if (!finalBitmap)
+    {
+        SelectObject(
+            renderDC,
+            oldRenderBitmap
+        );
+
+        DeleteObject(
+            renderBitmap
+        );
+
+        DeleteDC(renderDC);
+        DeleteDC(finalDC);
+        ReleaseDC(nullptr, screenDC);
+
+        return;
+    }
+
+    HBITMAP oldFinalBitmap =
+        (HBITMAP)SelectObject(
+            finalDC,
+            finalBitmap
+        );
+
+    // ========================================================
+    // CLEAR HIGH-RES BITMAP
+    // ========================================================
+
+    RECT renderRect =
     {
         0,
         0,
-        overlayWidth,
-        overlayHeight
+        renderWidth,
+        renderHeight
     };
 
     FillRect(
-        memDC,
-        &fullRect,
+        renderDC,
+        &renderRect,
         (HBRUSH)GetStockObject(
             BLACK_BRUSH
         )
     );
 
     // ========================================================
-    // CLICKABLE MODE TOP BAR
+    // CLICKABLE TOP BAR
     // ========================================================
 
     if (clickableMode)
@@ -1063,8 +1144,9 @@ void DrawOverlay()
         {
             0,
             0,
-            overlayWidth,
-            TOP_BAR_HEIGHT
+            renderWidth,
+            TOP_BAR_HEIGHT *
+                RENDER_SCALE
         };
 
         HBRUSH whiteBrush =
@@ -1073,7 +1155,7 @@ void DrawOverlay()
             );
 
         FillRect(
-            memDC,
+            renderDC,
             &barRect,
             whiteBrush
         );
@@ -1097,7 +1179,8 @@ void DrawOverlay()
 
     HFONT font =
         CreateFontW(
-            -fontHeight,
+            -fontHeight *
+                RENDER_SCALE,
             0,
             0,
             0,
@@ -1115,7 +1198,7 @@ void DrawOverlay()
 
     HFONT oldFont =
         (HFONT)SelectObject(
-            memDC,
+            renderDC,
             font
         );
 
@@ -1132,54 +1215,107 @@ void DrawOverlay()
     RECT textRect =
     {
         0,
-        TOP_BAR_HEIGHT,
-        overlayWidth,
-        overlayHeight
+        TOP_BAR_HEIGHT *
+            RENDER_SCALE,
+        renderWidth,
+        renderHeight
     };
 
     DrawStyledText(
-        memDC,
+        renderDC,
         text,
-        textRect
+        textRect,
+        RENDER_SCALE
     );
 
     // ========================================================
-    // CONVERT TO ALPHA
+    // DOWNSAMPLE
     // ========================================================
 
-    if (bits)
+    DWORD* sourcePixels =
+        static_cast<DWORD*>(
+            renderBits
+        );
+
+    DWORD* destinationPixels =
+        static_cast<DWORD*>(
+            finalBits
+        );
+
+    for (
+        int y = 0;
+        y < overlayHeight;
+        ++y
+    )
     {
-        DWORD* pixels =
-            static_cast<DWORD*>(
-                bits
-            );
-
-        const int pixelCount =
-            overlayWidth *
-            overlayHeight;
-
         for (
-            int i = 0;
-            i < pixelCount;
-            ++i
+            int x = 0;
+            x < overlayWidth;
+            ++x
         )
         {
-            DWORD pixel =
-                pixels[i];
+            unsigned int redTotal = 0;
+            unsigned int greenTotal = 0;
+            unsigned int blueTotal = 0;
 
-            BYTE blue =
+            for (
+                int sy = 0;
+                sy < RENDER_SCALE;
+                ++sy
+            )
+            {
+                for (
+                    int sx = 0;
+                    sx < RENDER_SCALE;
+                    ++sx
+                )
+                {
+                    int sourceX =
+                        x * RENDER_SCALE +
+                        sx;
+
+                    int sourceY =
+                        y * RENDER_SCALE +
+                        sy;
+
+                    DWORD pixel =
+                        sourcePixels[
+                            sourceY *
+                            renderWidth +
+                            sourceX
+                        ];
+
+                    redTotal +=
+                        (pixel >> 16) & 0xFF;
+
+                    greenTotal +=
+                        (pixel >> 8) & 0xFF;
+
+                    blueTotal +=
+                        pixel & 0xFF;
+                }
+            }
+
+            const unsigned int samples =
+                RENDER_SCALE *
+                RENDER_SCALE;
+
+            BYTE red =
                 static_cast<BYTE>(
-                    pixel & 0xFF
+                    redTotal /
+                    samples
                 );
 
             BYTE green =
                 static_cast<BYTE>(
-                    (pixel >> 8) & 0xFF
+                    greenTotal /
+                    samples
                 );
 
-            BYTE red =
+            BYTE blue =
                 static_cast<BYTE>(
-                    (pixel >> 16) & 0xFF
+                    blueTotal /
+                    samples
                 );
 
             BYTE brightness =
@@ -1193,11 +1329,17 @@ void DrawOverlay()
 
             if (brightness == 0)
             {
-                pixels[i] = 0;
+                destinationPixels[
+                    y * overlayWidth + x
+                ] = 0;
             }
             else
             {
-                pixels[i] =
+                // Use brightness as alpha while
+                // preserving the rendered RGB.
+                destinationPixels[
+                    y * overlayWidth + x
+                ] =
                     (static_cast<DWORD>(
                         brightness
                     ) << 24) |
@@ -1213,6 +1355,10 @@ void DrawOverlay()
             }
         }
     }
+
+    // ========================================================
+    // UPDATE LAYERED WINDOW
+    // ========================================================
 
     POINT destination =
     {
@@ -1248,15 +1394,19 @@ void DrawOverlay()
         screenDC,
         &destination,
         &size,
-        memDC,
+        finalDC,
         &source,
         0,
         &blend,
         ULW_ALPHA
     );
 
+    // ========================================================
+    // CLEANUP
+    // ========================================================
+
     SelectObject(
-        memDC,
+        renderDC,
         oldFont
     );
 
@@ -1265,16 +1415,29 @@ void DrawOverlay()
     );
 
     SelectObject(
-        memDC,
-        oldBitmap
+        renderDC,
+        oldRenderBitmap
+    );
+
+    SelectObject(
+        finalDC,
+        oldFinalBitmap
     );
 
     DeleteObject(
-        bitmap
+        renderBitmap
+    );
+
+    DeleteObject(
+        finalBitmap
     );
 
     DeleteDC(
-        memDC
+        renderDC
+    );
+
+    DeleteDC(
+        finalDC
     );
 
     ReleaseDC(
@@ -1820,7 +1983,7 @@ int WINAPI WinMain(
     );
 
     // ========================================================
-    // GLOBAL INPUT HOOKS
+    // INPUT HOOKS
     // ========================================================
 
     keyboardHook =
