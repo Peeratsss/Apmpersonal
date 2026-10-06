@@ -5,7 +5,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
-
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -38,10 +37,6 @@ static ULONGLONG lastActionTime = 0;
 
 static BYTE keyRepeatCount[256] = { 0 };
 
-// ============================================================
-// INPUT STATISTICS
-// ============================================================
-
 struct InputStat
 {
     std::wstring name;
@@ -49,9 +44,20 @@ struct InputStat
 };
 
 static std::vector<InputStat> inputStats;
-
-// Every individual button press in chronological order.
 static std::vector<std::wstring> inputTimeline;
+
+
+// ============================================================
+// TRAY
+// ============================================================
+
+#define WM_TRAYICON      (WM_USER + 1)
+
+#define ID_TRAY_CLICK    1001
+#define ID_TRAY_RESET    1002
+#define ID_TRAY_INPUT    1003
+#define ID_TRAY_EXIT     1004
+
 
 // ============================================================
 // FILE PATHS
@@ -67,44 +73,39 @@ std::wstring GetExeDirectory()
         MAX_PATH
     );
 
-    std::wstring fullPath(path);
+    std::wstring result(path);
 
-    size_t pos =
-        fullPath.find_last_of(L"\\/");
+    size_t slash = result.find_last_of(L"\\/");
 
-    if (pos == std::wstring::npos)
-        return L".";
+    if (slash != std::wstring::npos)
+        result.resize(slash);
 
-    return fullPath.substr(
-        0,
-        pos
-    );
+    return result;
 }
+
 
 std::wstring GetSettingsPath()
 {
-    return GetExeDirectory() +
-           L"\\APMOverlay.txt";
+    return GetExeDirectory() + L"\\APMOverlay.txt";
 }
+
 
 std::wstring GetInputStatsPath()
 {
-    return GetExeDirectory() +
-           L"\\Inputs.txt";
+    return GetExeDirectory() + L"\\Inputs.txt";
 }
+
 
 // ============================================================
 // UTF-8
 // ============================================================
 
-std::string WideToUTF8(
-    const std::wstring& text
-)
+std::string WideToUTF8(const std::wstring& text)
 {
     if (text.empty())
         return "";
 
-    int sizeNeeded =
+    int size =
         WideCharToMultiByte(
             CP_UTF8,
             0,
@@ -116,13 +117,10 @@ std::string WideToUTF8(
             nullptr
         );
 
-    if (sizeNeeded <= 1)
+    if (size <= 0)
         return "";
 
-    std::string result(
-        sizeNeeded - 1,
-        '\0'
-    );
+    std::string result(size - 1, '\0');
 
     WideCharToMultiByte(
         CP_UTF8,
@@ -130,7 +128,7 @@ std::string WideToUTF8(
         text.c_str(),
         -1,
         &result[0],
-        sizeNeeded,
+        size,
         nullptr,
         nullptr
     );
@@ -138,76 +136,64 @@ std::string WideToUTF8(
     return result;
 }
 
+
 // ============================================================
 // SETTINGS
 // ============================================================
 
 void SaveSettings()
 {
-    std::ofstream file(
-        GetSettingsPath(),
-        std::ios::trunc
-    );
-
-    if (!file)
-        return;
-
-    file << "X=" << overlayX << "\n";
-    file << "Y=" << overlayY << "\n";
-    file << "Width=" << overlayWidth << "\n";
-    file << "Height=" << overlayHeight << "\n";
-}
-
-void LoadSettings()
-{
-    std::ifstream file(
+    std::wofstream file(
         GetSettingsPath()
     );
 
-    if (!file)
+    if (!file.is_open())
         return;
 
-    std::string line;
+    file << L"X=" << overlayX << L"\n";
+    file << L"Y=" << overlayY << L"\n";
+    file << L"Width=" << overlayWidth << L"\n";
+    file << L"Height=" << overlayHeight << L"\n";
+}
+
+
+void LoadSettings()
+{
+    std::wifstream file(
+        GetSettingsPath()
+    );
+
+    if (!file.is_open())
+        return;
+
+    std::wstring line;
 
     while (std::getline(file, line))
     {
-        size_t equal =
-            line.find('=');
+        size_t equals = line.find(L'=');
 
-        if (equal == std::string::npos)
+        if (equals == std::wstring::npos)
             continue;
 
-        std::string key =
-            line.substr(
-                0,
-                equal
-            );
+        std::wstring key =
+            line.substr(0, equals);
 
-        std::string value =
-            line.substr(
-                equal + 1
-            );
+        std::wstring value =
+            line.substr(equals + 1);
 
-        try
-        {
-            int number =
-                std::stoi(value);
+        int number = _wtoi(value.c_str());
 
-            if (key == "X")
-                overlayX = number;
+        if (key == L"X")
+            overlayX = number;
 
-            else if (key == "Y")
-                overlayY = number;
+        else if (key == L"Y")
+            overlayY = number;
 
-            else if (key == "Width")
-                overlayWidth = number;
+        else if (key == L"Width")
+            overlayWidth = number;
 
-            else if (key == "Height")
-                overlayHeight = number;
-        }
-        catch (...)
-        {
-        }
+        else if (key == L"Height")
+            overlayHeight = number;
     }
 
     if (overlayWidth < 50)
@@ -217,23 +203,22 @@ void LoadSettings()
         overlayHeight = 20;
 }
 
+
 // ============================================================
-// SAVE INPUT HISTORY
+// INPUT TRACKER FILE
 // ============================================================
 
 void SaveInputStats()
 {
     std::ofstream file(
         GetInputStatsPath(),
-        std::ios::trunc
+        std::ios::out |
+        std::ios::trunc |
+        std::ios::binary
     );
 
-    if (!file)
+    if (!file.is_open())
         return;
-
-    // --------------------------------------------------------
-    // BUTTON PRESS COUNTS
-    // --------------------------------------------------------
 
     file << "=== BUTTON PRESS COUNTS ===\n\n";
 
@@ -246,10 +231,6 @@ void SaveInputStats()
             << "\n";
     }
 
-    // --------------------------------------------------------
-    // INPUT TIMELINE
-    // --------------------------------------------------------
-
     file << "\n\n";
     file << "=== INPUT TIMELINE ===\n\n";
 
@@ -261,20 +242,20 @@ void SaveInputStats()
     }
 }
 
+
 // ============================================================
-// RECORD INPUT
+// INPUT TRACKER
 // ============================================================
 
 void RecordInputLocked(
-    const std::wstring& inputName
+    const std::wstring& name
 )
 {
-    // Update button count.
     bool found = false;
 
     for (auto& stat : inputStats)
     {
-        if (stat.name == inputName)
+        if (stat.name == name)
         {
             stat.count++;
             found = true;
@@ -282,61 +263,34 @@ void RecordInputLocked(
         }
     }
 
-    // First appearance gets its own entry.
     if (!found)
     {
-        InputStat newStat;
+        InputStat stat;
 
-        newStat.name = inputName;
-        newStat.count = 1;
+        stat.name = name;
+        stat.count = 1;
 
-        inputStats.push_back(
-            newStat
-        );
+        inputStats.push_back(stat);
     }
 
-    // Record the actual individual press.
-    inputTimeline.push_back(
-        inputName
-    );
+    inputTimeline.push_back(name);
 
-    // Save immediately.
     SaveInputStats();
 }
 
+
 // ============================================================
-// RESET APM + INPUT HISTORY
+// RESET APM ONLY
 // ============================================================
 
-void ResetEverything()
+void ResetAPM()
 {
-    EnterCriticalSection(
-        &actionLock
-    );
+    EnterCriticalSection(&actionLock);
 
-    // Reset rolling APM.
     actions.clear();
-
     lastActionTime = 0;
 
-    // Reset button press counts.
-    inputStats.clear();
-
-    // Reset chronological input timeline.
-    inputTimeline.clear();
-
-    // Reset held-key repeat tracking.
-    ZeroMemory(
-        keyRepeatCount,
-        sizeof(keyRepeatCount)
-    );
-
-    LeaveCriticalSection(
-        &actionLock
-    );
-
-    // Immediately clear Inputs.txt.
-    SaveInputStats();
+    LeaveCriticalSection(&actionLock);
 
     InvalidateRect(
         hwnd,
@@ -345,8 +299,35 @@ void ResetEverything()
     );
 }
 
+
 // ============================================================
-// APM HISTORY
+// RESET INPUT TRACKER ONLY
+// ============================================================
+
+void ResetInputTracker()
+{
+    EnterCriticalSection(&actionLock);
+
+    inputStats.clear();
+    inputTimeline.clear();
+
+    for (int i = 0; i < 256; ++i)
+        keyRepeatCount[i] = 0;
+
+    SaveInputStats();
+
+    LeaveCriticalSection(&actionLock);
+
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
+    );
+}
+
+
+// ============================================================
+// APM CLEANUP
 // ============================================================
 
 void RemoveOldActionsLocked()
@@ -357,8 +338,6 @@ void RemoveOldActionsLocked()
     const ULONGLONG window =
         60000ULL;
 
-    // Force APM to zero after
-    // 60 seconds with no input.
     if (
         lastActionTime != 0 &&
         now >= lastActionTime &&
@@ -366,9 +345,7 @@ void RemoveOldActionsLocked()
     )
     {
         actions.clear();
-
         lastActionTime = 0;
-
         return;
     }
 
@@ -396,38 +373,36 @@ void RemoveOldActionsLocked()
         lastActionTime = 0;
 }
 
+
 // ============================================================
-// ACTION
+// RECORD ACTION
 // ============================================================
 
 void Action(
     const std::wstring& inputName
 )
 {
-    const ULONGLONG now =
+    ULONGLONG now =
         GetTickCount64();
 
-    EnterCriticalSection(
-        &actionLock
-    );
-
-    actions.push_back(
-        now
-    );
-
-    lastActionTime =
-        now;
-
-    RecordInputLocked(
-        inputName
-    );
+    EnterCriticalSection(&actionLock);
 
     RemoveOldActionsLocked();
 
-    LeaveCriticalSection(
-        &actionLock
+    actions.push_back(now);
+    lastActionTime = now;
+
+    RecordInputLocked(inputName);
+
+    LeaveCriticalSection(&actionLock);
+
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        FALSE
     );
 }
+
 
 // ============================================================
 // GET APM
@@ -435,9 +410,7 @@ void Action(
 
 int GetAPM()
 {
-    EnterCriticalSection(
-        &actionLock
-    );
+    EnterCriticalSection(&actionLock);
 
     RemoveOldActionsLocked();
 
@@ -446,263 +419,220 @@ int GetAPM()
             actions.size()
         );
 
-    LeaveCriticalSection(
-        &actionLock
-    );
+    LeaveCriticalSection(&actionLock);
 
     return result;
 }
+
 
 // ============================================================
 // KEY NAME
 // ============================================================
 
 std::wstring GetKeyName(
-    DWORD vkCode
+    DWORD vk
 )
 {
-    switch (vkCode)
+    switch (vk)
     {
-        case VK_SPACE:
-            return L"Space";
+    case VK_SPACE:
+        return L"Space";
 
-        case VK_RETURN:
-            return L"Enter";
+    case VK_RETURN:
+        return L"Enter";
 
-        case VK_ESCAPE:
-            return L"Esc";
+    case VK_ESCAPE:
+        return L"Esc";
 
-        case VK_TAB:
-            return L"Tab";
+    case VK_TAB:
+        return L"Tab";
 
-        case VK_BACK:
-            return L"Backspace";
+    case VK_BACK:
+        return L"Backspace";
 
-        case VK_SHIFT:
-            return L"Shift";
+    case VK_SHIFT:
+        return L"Shift";
 
-        case VK_LSHIFT:
-            return L"Left Shift";
+    case VK_LSHIFT:
+        return L"Left Shift";
 
-        case VK_RSHIFT:
-            return L"Right Shift";
+    case VK_RSHIFT:
+        return L"Right Shift";
 
-        case VK_CONTROL:
-            return L"Ctrl";
+    case VK_CONTROL:
+        return L"Ctrl";
 
-        case VK_LCONTROL:
-            return L"Left Ctrl";
+    case VK_LCONTROL:
+        return L"Left Ctrl";
 
-        case VK_RCONTROL:
-            return L"Right Ctrl";
+    case VK_RCONTROL:
+        return L"Right Ctrl";
 
-        case VK_MENU:
-            return L"Alt";
+    case VK_MENU:
+        return L"Alt";
 
-        case VK_LMENU:
-            return L"Left Alt";
+    case VK_LMENU:
+        return L"Left Alt";
 
-        case VK_RMENU:
-            return L"Right Alt";
+    case VK_RMENU:
+        return L"Right Alt";
 
-        case VK_CAPITAL:
-            return L"Caps Lock";
+    case VK_CAPITAL:
+        return L"Caps Lock";
 
-        case VK_INSERT:
-            return L"Insert";
+    case VK_INSERT:
+        return L"Insert";
 
-        case VK_DELETE:
-            return L"Delete";
+    case VK_DELETE:
+        return L"Delete";
 
-        case VK_HOME:
-            return L"Home";
+    case VK_HOME:
+        return L"Home";
 
-        case VK_END:
-            return L"End";
+    case VK_END:
+        return L"End";
 
-        case VK_PRIOR:
-            return L"Page Up";
+    case VK_PRIOR:
+        return L"Page Up";
 
-        case VK_NEXT:
-            return L"Page Down";
+    case VK_NEXT:
+        return L"Page Down";
 
-        case VK_LEFT:
-            return L"Left Arrow";
+    case VK_LEFT:
+        return L"Left";
 
-        case VK_RIGHT:
-            return L"Right Arrow";
+    case VK_RIGHT:
+        return L"Right";
 
-        case VK_UP:
-            return L"Up Arrow";
+    case VK_UP:
+        return L"Up";
 
-        case VK_DOWN:
-            return L"Down Arrow";
+    case VK_DOWN:
+        return L"Down";
 
-        case VK_NUMLOCK:
-            return L"Num Lock";
+    case VK_NUMLOCK:
+        return L"Num Lock";
 
-        case VK_SCROLL:
-            return L"Scroll Lock";
+    case VK_SCROLL:
+        return L"Scroll Lock";
 
-        case VK_LWIN:
-            return L"Left Win";
+    case VK_LWIN:
+        return L"Left Windows";
 
-        case VK_RWIN:
-            return L"Right Win";
+    case VK_RWIN:
+        return L"Right Windows";
 
-        case VK_APPS:
-            return L"Menu";
+    case VK_APPS:
+        return L"Menu";
 
-        case VK_F1:
-            return L"F1";
+    case VK_F1:
+        return L"F1";
 
-        case VK_F2:
-            return L"F2";
+    case VK_F2:
+        return L"F2";
 
-        case VK_F3:
-            return L"F3";
+    case VK_F3:
+        return L"F3";
 
-        case VK_F4:
-            return L"F4";
+    case VK_F4:
+        return L"F4";
 
-        case VK_F5:
-            return L"F5";
+    case VK_F5:
+        return L"F5";
 
-        case VK_F6:
-            return L"F6";
+    case VK_F6:
+        return L"F6";
 
-        case VK_F7:
-            return L"F7";
+    case VK_F7:
+        return L"F7";
 
-        case VK_F8:
-            return L"F8";
+    case VK_F8:
+        return L"F8";
 
-        case VK_F9:
-            return L"F9";
+    case VK_F9:
+        return L"F9";
 
-        case VK_F10:
-            return L"F10";
+    case VK_F10:
+        return L"F10";
 
-        case VK_F11:
-            return L"F11";
+    case VK_F11:
+        return L"F11";
 
-        case VK_F12:
-            return L"F12";
+    case VK_F12:
+        return L"F12";
 
-        case VK_NUMPAD0:
-            return L"Num0";
+    case VK_NUMPAD0:
+        return L"Num0";
 
-        case VK_NUMPAD1:
-            return L"Num1";
+    case VK_NUMPAD1:
+        return L"Num1";
 
-        case VK_NUMPAD2:
-            return L"Num2";
+    case VK_NUMPAD2:
+        return L"Num2";
 
-        case VK_NUMPAD3:
-            return L"Num3";
+    case VK_NUMPAD3:
+        return L"Num3";
 
-        case VK_NUMPAD4:
-            return L"Num4";
+    case VK_NUMPAD4:
+        return L"Num4";
 
-        case VK_NUMPAD5:
-            return L"Num5";
+    case VK_NUMPAD5:
+        return L"Num5";
 
-        case VK_NUMPAD6:
-            return L"Num6";
+    case VK_NUMPAD6:
+        return L"Num6";
 
-        case VK_NUMPAD7:
-            return L"Num7";
+    case VK_NUMPAD7:
+        return L"Num7";
 
-        case VK_NUMPAD8:
-            return L"Num8";
+    case VK_NUMPAD8:
+        return L"Num8";
 
-        case VK_NUMPAD9:
-            return L"Num9";
+    case VK_NUMPAD9:
+        return L"Num9";
 
-        case VK_MULTIPLY:
-            return L"Num *";
+    case VK_ADD:
+        return L"Num +";
 
-        case VK_ADD:
-            return L"Num +";
+    case VK_SUBTRACT:
+        return L"Num -";
 
-        case VK_SUBTRACT:
-            return L"Num -";
+    case VK_MULTIPLY:
+        return L"Num *";
 
-        case VK_DECIMAL:
-            return L"Num .";
+    case VK_DIVIDE:
+        return L"Num /";
 
-        case VK_DIVIDE:
-            return L"Num /";
+    case VK_DECIMAL:
+        return L"Num .";
 
-        case VK_OEM_1:
-            return L";";
-
-        case VK_OEM_PLUS:
-            return L"=";
-
-        case VK_OEM_COMMA:
-            return L",";
-
-        case VK_OEM_MINUS:
-            return L"-";
-
-        case VK_OEM_PERIOD:
-            return L".";
-
-        case VK_OEM_2:
-            return L"/";
-
-        case VK_OEM_3:
-            return L"`";
-
-        case VK_OEM_4:
-            return L"[";
-
-        case VK_OEM_5:
-            return L"\\";
-
-        case VK_OEM_6:
-            return L"]";
-
-        case VK_OEM_7:
-            return L"'";
+    default:
+        break;
     }
 
-    if (
-        vkCode >= 'A' &&
-        vkCode <= 'Z'
-    )
+    if (vk >= 'A' && vk <= 'Z')
     {
-        wchar_t buffer[2] = {};
-
-        buffer[0] =
-            static_cast<wchar_t>(
-                vkCode
-            );
+        wchar_t buffer[2] = {
+            static_cast<wchar_t>(vk),
+            L'\0'
+        };
 
         return buffer;
     }
 
-    if (
-        vkCode >= '0' &&
-        vkCode <= '9'
-    )
+    if (vk >= '0' && vk <= '9')
     {
-        wchar_t buffer[2] = {};
-
-        buffer[0] =
-            static_cast<wchar_t>(
-                vkCode
-            );
+        wchar_t buffer[2] = {
+            static_cast<wchar_t>(vk),
+            L'\0'
+        };
 
         return buffer;
     }
-
-    wchar_t name[64] = {};
 
     UINT scanCode =
         MapVirtualKeyW(
-            vkCode,
+            vk,
             MAPVK_VK_TO_VSC
         );
 
@@ -711,30 +641,68 @@ std::wstring GetKeyName(
             scanCode << 16
         );
 
+    wchar_t buffer[128] = {};
+
     if (
         GetKeyNameTextW(
             lParam,
-            name,
-            64
-        )
+            buffer,
+            128
+        ) > 0
     )
     {
-        return name;
+        return buffer;
     }
 
     std::wstringstream ss;
 
-    ss << L"VK "
-       << vkCode;
+    ss << L"VK " << vk;
 
     return ss.str();
 }
+
+
+// ============================================================
+// MOUSE NAME
+// ============================================================
+
+std::wstring GetMouseButtonName(
+    WPARAM wParam
+)
+{
+    switch (wParam)
+    {
+    case WM_LBUTTONDOWN:
+        return L"Left Click";
+
+    case WM_RBUTTONDOWN:
+        return L"Right Click";
+
+    case WM_MBUTTONDOWN:
+        return L"Middle Click";
+
+    case WM_XBUTTONDOWN:
+    {
+        WORD button =
+            GET_XBUTTON_WPARAM(wParam);
+
+        if (button == XBUTTON1)
+            return L"XButton 1";
+
+        return L"XButton 2";
+    }
+
+    default:
+        return L"Mouse";
+    }
+}
+
 
 // ============================================================
 // KEYBOARD HOOK
 // ============================================================
 
-LRESULT CALLBACK KeyboardHookProc(
+LRESULT CALLBACK KeyboardProc(
     int nCode,
     WPARAM wParam,
     LPARAM lParam
@@ -742,49 +710,47 @@ LRESULT CALLBACK KeyboardHookProc(
 {
     if (nCode == HC_ACTION)
     {
-        KBDLLHOOKSTRUCT* kb =
-            reinterpret_cast<KBDLLHOOKSTRUCT*>(
-                lParam
-            );
+        KBDLLHOOKSTRUCT* data =
+            reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-        if (
-            kb &&
-            !(kb->flags & LLKHF_INJECTED)
-        )
+        if (data)
         {
-            DWORD vk =
-                kb->vkCode;
-
-            // F8/F9 are ignored.
-            if (
-                vk != VK_F8 &&
-                vk != VK_F9 &&
-                vk < 256
-            )
+            // Ignore injected/synthetic input.
+            if (!(data->flags & LLKHF_INJECTED))
             {
+                DWORD vk = data->vkCode;
+
+                // F8/F9 are ignored.
+                // F10 is NOT a reset key.
                 if (
-                    wParam == WM_KEYDOWN ||
-                    wParam == WM_SYSKEYDOWN
+                    vk != VK_F8 &&
+                    vk != VK_F9 &&
+                    vk < 256
                 )
                 {
-                    // Maximum 5 presses while held.
                     if (
-                        keyRepeatCount[vk] < 5
+                        wParam == WM_KEYDOWN ||
+                        wParam == WM_SYSKEYDOWN
                     )
                     {
-                        keyRepeatCount[vk]++;
+                        // Count only the first 5 repeats
+                        // while a key is held.
+                        if (keyRepeatCount[vk] < 5)
+                        {
+                            keyRepeatCount[vk]++;
 
-                        Action(
-                            GetKeyName(vk)
-                        );
+                            Action(
+                                GetKeyName(vk)
+                            );
+                        }
                     }
-                }
-                else if (
-                    wParam == WM_KEYUP ||
-                    wParam == WM_SYSKEYUP
-                )
-                {
-                    keyRepeatCount[vk] = 0;
+                    else if (
+                        wParam == WM_KEYUP ||
+                        wParam == WM_SYSKEYUP
+                    )
+                    {
+                        keyRepeatCount[vk] = 0;
+                    }
                 }
             }
         }
@@ -798,38 +764,12 @@ LRESULT CALLBACK KeyboardHookProc(
     );
 }
 
-// ============================================================
-// MOUSE BUTTON NAME
-// ============================================================
-
-std::wstring GetMouseButtonName(
-    WPARAM message
-)
-{
-    switch (message)
-    {
-        case WM_LBUTTONDOWN:
-            return L"Left Click";
-
-        case WM_RBUTTONDOWN:
-            return L"Right Click";
-
-        case WM_MBUTTONDOWN:
-            return L"Middle Click";
-
-        case WM_XBUTTONDOWN:
-            return L"X Button";
-
-        default:
-            return L"Mouse";
-    }
-}
 
 // ============================================================
 // MOUSE HOOK
 // ============================================================
 
-LRESULT CALLBACK MouseHookProc(
+LRESULT CALLBACK MouseProc(
     int nCode,
     WPARAM wParam,
     LPARAM lParam
@@ -837,18 +777,16 @@ LRESULT CALLBACK MouseHookProc(
 {
     if (nCode == HC_ACTION)
     {
-        MSLLHOOKSTRUCT* ms =
-            reinterpret_cast<MSLLHOOKSTRUCT*>(
-                lParam
-            );
+        MSLLHOOKSTRUCT* data =
+            reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-        if (
-            ms &&
-            !(ms->flags & LLMHF_INJECTED)
-        )
+        if (data)
         {
-            switch (wParam)
+            // Ignore injected/synthetic mouse input.
+            if (!(data->flags & LLMHF_INJECTED))
             {
+                switch (wParam)
+                {
                 case WM_LBUTTONDOWN:
                 case WM_RBUTTONDOWN:
                 case WM_MBUTTONDOWN:
@@ -861,9 +799,7 @@ LRESULT CALLBACK MouseHookProc(
                     );
 
                     break;
-
-                default:
-                    break;
+                }
             }
         }
     }
@@ -876,386 +812,22 @@ LRESULT CALLBACK MouseHookProc(
     );
 }
 
+
 // ============================================================
-// TEXT DRAWING
+// DRAW TEXT
 // ============================================================
 
 void DrawStyledText(
     HDC dc,
     const std::wstring& text,
-    RECT rect,
-    int scale
+    int x,
+    int y,
+    int fontHeight
 )
 {
-    const int shadow =
-        2 * scale;
-
-    SetTextCharacterExtra(
-        dc,
-        1 * scale
-    );
-
-    SetBkMode(
-        dc,
-        TRANSPARENT
-    );
-
-    // --------------------------------------------------------
-    // Shadow
-    // --------------------------------------------------------
-
-    SetTextColor(
-        dc,
-        RGB(0, 0, 0)
-    );
-
-    RECT shadowRect =
-        rect;
-
-    shadowRect.left +=
-        shadow;
-
-    shadowRect.top +=
-        shadow;
-
-    shadowRect.right +=
-        shadow;
-
-    shadowRect.bottom +=
-        shadow;
-
-    DrawTextW(
-        dc,
-        text.c_str(),
-        -1,
-        &shadowRect,
-        DT_CENTER |
-        DT_VCENTER |
-        DT_SINGLELINE |
-        DT_NOPREFIX
-    );
-
-    // --------------------------------------------------------
-    // Outline
-    // --------------------------------------------------------
-
-    SetTextColor(
-        dc,
-        RGB(25, 25, 25)
-    );
-
-    const int offsets[][2] =
-    {
-        {-1, -1},
-        { 0, -1},
-        { 1, -1},
-        {-1,  0},
-        { 1,  0},
-        {-1,  1},
-        { 0,  1},
-        { 1,  1}
-    };
-
-    for (
-        const auto& offset :
-        offsets
-    )
-    {
-        RECT outlineRect =
-            rect;
-
-        outlineRect.left +=
-            offset[0] * scale;
-
-        outlineRect.top +=
-            offset[1] * scale;
-
-        outlineRect.right +=
-            offset[0] * scale;
-
-        outlineRect.bottom +=
-            offset[1] * scale;
-
-        DrawTextW(
-            dc,
-            text.c_str(),
-            -1,
-            &outlineRect,
-            DT_CENTER |
-            DT_VCENTER |
-            DT_SINGLELINE |
-            DT_NOPREFIX
-        );
-    }
-
-    // --------------------------------------------------------
-    // Main text
-    // --------------------------------------------------------
-
-    SetTextColor(
-        dc,
-        RGB(255, 255, 255)
-    );
-
-    DrawTextW(
-        dc,
-        text.c_str(),
-        -1,
-        &rect,
-        DT_CENTER |
-        DT_VCENTER |
-        DT_SINGLELINE |
-        DT_NOPREFIX
-    );
-
-    SetTextCharacterExtra(
-        dc,
-        0
-    );
-}
-
-// ============================================================
-// DRAW OVERLAY
-// ============================================================
-
-void DrawOverlay()
-{
-    if (!hwnd)
-        return;
-
-    RECT windowRect;
-
-    if (
-        !GetWindowRect(
-            hwnd,
-            &windowRect
-        )
-    )
-    {
-        return;
-    }
-
-    overlayX =
-        windowRect.left;
-
-    overlayY =
-        windowRect.top;
-
-    overlayWidth =
-        windowRect.right -
-        windowRect.left;
-
-    overlayHeight =
-        windowRect.bottom -
-        windowRect.top;
-
-    if (
-        overlayWidth <= 0 ||
-        overlayHeight <= 0
-    )
-    {
-        return;
-    }
-
-    const int renderWidth =
-        overlayWidth *
-        RENDER_SCALE;
-
-    const int renderHeight =
-        overlayHeight *
-        RENDER_SCALE;
-
-    HDC screenDC =
-        GetDC(nullptr);
-
-    HDC renderDC =
-        CreateCompatibleDC(
-            screenDC
-        );
-
-    HDC finalDC =
-        CreateCompatibleDC(
-            screenDC
-        );
-
-    BITMAPINFO renderInfo = {};
-
-    renderInfo.bmiHeader.biSize =
-        sizeof(BITMAPINFOHEADER);
-
-    renderInfo.bmiHeader.biWidth =
-        renderWidth;
-
-    renderInfo.bmiHeader.biHeight =
-        -renderHeight;
-
-    renderInfo.bmiHeader.biPlanes =
-        1;
-
-    renderInfo.bmiHeader.biBitCount =
-        32;
-
-    renderInfo.bmiHeader.biCompression =
-        BI_RGB;
-
-    void* renderBits = nullptr;
-
-    HBITMAP renderBitmap =
-        CreateDIBSection(
-            renderDC,
-            &renderInfo,
-            DIB_RGB_COLORS,
-            &renderBits,
-            nullptr,
-            0
-        );
-
-    if (!renderBitmap)
-    {
-        DeleteDC(renderDC);
-        DeleteDC(finalDC);
-
-        ReleaseDC(
-            nullptr,
-            screenDC
-        );
-
-        return;
-    }
-
-    HBITMAP oldRenderBitmap =
-        (HBITMAP)SelectObject(
-            renderDC,
-            renderBitmap
-        );
-
-    BITMAPINFO finalInfo = {};
-
-    finalInfo.bmiHeader.biSize =
-        sizeof(BITMAPINFOHEADER);
-
-    finalInfo.bmiHeader.biWidth =
-        overlayWidth;
-
-    finalInfo.bmiHeader.biHeight =
-        -overlayHeight;
-
-    finalInfo.bmiHeader.biPlanes =
-        1;
-
-    finalInfo.bmiHeader.biBitCount =
-        32;
-
-    finalInfo.bmiHeader.biCompression =
-        BI_RGB;
-
-    void* finalBits = nullptr;
-
-    HBITMAP finalBitmap =
-        CreateDIBSection(
-            finalDC,
-            &finalInfo,
-            DIB_RGB_COLORS,
-            &finalBits,
-            nullptr,
-            0
-        );
-
-    if (!finalBitmap)
-    {
-        SelectObject(
-            renderDC,
-            oldRenderBitmap
-        );
-
-        DeleteObject(
-            renderBitmap
-        );
-
-        DeleteDC(renderDC);
-        DeleteDC(finalDC);
-
-        ReleaseDC(
-            nullptr,
-            screenDC
-        );
-
-        return;
-    }
-
-    HBITMAP oldFinalBitmap =
-        (HBITMAP)SelectObject(
-            finalDC,
-            finalBitmap
-        );
-
-    // --------------------------------------------------------
-    // CLEAR
-    // --------------------------------------------------------
-
-    RECT renderRect =
-    {
-        0,
-        0,
-        renderWidth,
-        renderHeight
-    };
-
-    FillRect(
-        renderDC,
-        &renderRect,
-        (HBRUSH)GetStockObject(
-            BLACK_BRUSH
-        )
-    );
-
-    // --------------------------------------------------------
-    // CLICKABLE MODE TOP BAR
-    // --------------------------------------------------------
-
-    if (clickableMode)
-    {
-        RECT barRect =
-        {
-            0,
-            0,
-            renderWidth,
-            TOP_BAR_HEIGHT *
-                RENDER_SCALE
-        };
-
-        HBRUSH whiteBrush =
-            CreateSolidBrush(
-                RGB(255, 255, 255)
-            );
-
-        FillRect(
-            renderDC,
-            &barRect,
-            whiteBrush
-        );
-
-        DeleteObject(
-            whiteBrush
-        );
-    }
-
-    // --------------------------------------------------------
-    // FONT
-    // --------------------------------------------------------
-
-    int fontHeight =
-        max(
-            12,
-            overlayHeight -
-            TOP_BAR_HEIGHT -
-            6
-        );
-
     HFONT font =
         CreateFontW(
-            -fontHeight *
-                RENDER_SCALE,
+            -fontHeight * RENDER_SCALE,
             0,
             0,
             0,
@@ -1272,256 +844,342 @@ void DrawOverlay()
         );
 
     HFONT oldFont =
-        (HFONT)SelectObject(
-            renderDC,
-            font
+        static_cast<HFONT>(
+            SelectObject(
+                dc,
+                font
+            )
         );
 
-    std::wstring text =
-        L"APM " +
-        std::to_wstring(
-            GetAPM()
-        );
-
-    RECT textRect =
-    {
-        0,
-        TOP_BAR_HEIGHT *
-            RENDER_SCALE,
-        renderWidth,
-        renderHeight
-    };
-
-    DrawStyledText(
-        renderDC,
-        text,
-        textRect,
-        RENDER_SCALE
+    SetBkMode(
+        dc,
+        TRANSPARENT
     );
 
-    // --------------------------------------------------------
-    // DOWNSAMPLE
-    // --------------------------------------------------------
+    // Dark outline / shadow.
+    SetTextColor(
+        dc,
+        RGB(0, 0, 0)
+    );
 
-    DWORD* sourcePixels =
-        static_cast<DWORD*>(
-            renderBits
-        );
-
-    DWORD* destinationPixels =
-        static_cast<DWORD*>(
-            finalBits
-        );
-
-    for (
-        int y = 0;
-        y < overlayHeight;
-        ++y
-    )
+    for (int ox = -2; ox <= 2; ++ox)
     {
-        for (
-            int x = 0;
-            x < overlayWidth;
-            ++x
-        )
+        for (int oy = -2; oy <= 2; ++oy)
         {
-            unsigned int redTotal = 0;
-            unsigned int greenTotal = 0;
-            unsigned int blueTotal = 0;
-
-            for (
-                int sy = 0;
-                sy < RENDER_SCALE;
-                ++sy
-            )
-            {
-                for (
-                    int sx = 0;
-                    sx < RENDER_SCALE;
-                    ++sx
+            TextOutW(
+                dc,
+                x + ox,
+                y + oy,
+                text.c_str(),
+                static_cast<int>(
+                    text.length()
                 )
-                {
-                    int sourceX =
-                        x *
-                        RENDER_SCALE +
-                        sx;
-
-                    int sourceY =
-                        y *
-                        RENDER_SCALE +
-                        sy;
-
-                    DWORD pixel =
-                        sourcePixels[
-                            sourceY *
-                            renderWidth +
-                            sourceX
-                        ];
-
-                    redTotal +=
-                        (pixel >> 16) &
-                        0xFF;
-
-                    greenTotal +=
-                        (pixel >> 8) &
-                        0xFF;
-
-                    blueTotal +=
-                        pixel &
-                        0xFF;
-                }
-            }
-
-            const unsigned int samples =
-                RENDER_SCALE *
-                RENDER_SCALE;
-
-            BYTE red =
-                static_cast<BYTE>(
-                    redTotal /
-                    samples
-                );
-
-            BYTE green =
-                static_cast<BYTE>(
-                    greenTotal /
-                    samples
-                );
-
-            BYTE blue =
-                static_cast<BYTE>(
-                    blueTotal /
-                    samples
-                );
-
-            BYTE brightness =
-                max(
-                    red,
-                    max(
-                        green,
-                        blue
-                    )
-                );
-
-            if (brightness == 0)
-            {
-                destinationPixels[
-                    y *
-                    overlayWidth +
-                    x
-                ] = 0;
-            }
-            else
-            {
-                destinationPixels[
-                    y *
-                    overlayWidth +
-                    x
-                ] =
-                    (static_cast<DWORD>(
-                        brightness
-                    ) << 24) |
-
-                    (static_cast<DWORD>(
-                        red
-                    ) << 16) |
-
-                    (static_cast<DWORD>(
-                        green
-                    ) << 8) |
-
-                    static_cast<DWORD>(
-                        blue
-                    );
-            }
+            );
         }
     }
 
-    POINT destination =
-    {
-        overlayX,
-        overlayY
-    };
+    // Main white text.
+    SetTextColor(
+        dc,
+        RGB(255, 255, 255)
+    );
 
-    SIZE size =
-    {
-        overlayWidth,
-        overlayHeight
-    };
-
-    POINT source =
-    {
-        0,
-        0
-    };
-
-    BLENDFUNCTION blend = {};
-
-    blend.BlendOp =
-        AC_SRC_OVER;
-
-    blend.SourceConstantAlpha =
-        255;
-
-    blend.AlphaFormat =
-        AC_SRC_ALPHA;
-
-    UpdateLayeredWindow(
-        hwnd,
-        screenDC,
-        &destination,
-        &size,
-        finalDC,
-        &source,
-        0,
-        &blend,
-        ULW_ALPHA
+    TextOutW(
+        dc,
+        x,
+        y,
+        text.c_str(),
+        static_cast<int>(
+            text.length()
+        )
     );
 
     SelectObject(
-        renderDC,
+        dc,
         oldFont
     );
 
     DeleteObject(font);
+}
 
-    SelectObject(
-        renderDC,
-        oldRenderBitmap
+
+// ============================================================
+// DRAW OVERLAY
+// ============================================================
+
+void DrawOverlay(
+    HDC targetDC
+)
+{
+    int width =
+        overlayWidth;
+
+    int height =
+        overlayHeight;
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    int scaledWidth =
+        width * RENDER_SCALE;
+
+    int scaledHeight =
+        height * RENDER_SCALE;
+
+    HDC highDC =
+        CreateCompatibleDC(
+            targetDC
+        );
+
+    BITMAPINFO bmi = {};
+
+    bmi.bmiHeader.biSize =
+        sizeof(BITMAPINFOHEADER);
+
+    bmi.bmiHeader.biWidth =
+        scaledWidth;
+
+    bmi.bmiHeader.biHeight =
+        -scaledHeight;
+
+    bmi.bmiHeader.biPlanes =
+        1;
+
+    bmi.bmiHeader.biBitCount =
+        32;
+
+    bmi.bmiHeader.biCompression =
+        BI_RGB;
+
+    void* bits = nullptr;
+
+    HBITMAP bitmap =
+        CreateDIBSection(
+            targetDC,
+            &bmi,
+            DIB_RGB_COLORS,
+            &bits,
+            nullptr,
+            0
+        );
+
+    if (!bitmap)
+    {
+        DeleteDC(highDC);
+        return;
+    }
+
+    HBITMAP oldBitmap =
+        static_cast<HBITMAP>(
+            SelectObject(
+                highDC,
+                bitmap
+            )
+        );
+
+    RECT highRect = {
+        0,
+        0,
+        scaledWidth,
+        scaledHeight
+    };
+
+    HBRUSH background =
+        CreateSolidBrush(
+            RGB(0, 0, 0)
+        );
+
+    FillRect(
+        highDC,
+        &highRect,
+        background
     );
 
-    SelectObject(
-        finalDC,
-        oldFinalBitmap
+    DeleteObject(background);
+
+    int apm =
+        GetAPM();
+
+    std::wstring text =
+        L"APM " +
+        std::to_wstring(apm);
+
+    int fontHeight =
+        static_cast<int>(
+            height * 0.62
+        );
+
+    if (fontHeight < 10)
+        fontHeight = 10;
+
+    DrawStyledText(
+        highDC,
+        text,
+        8 * RENDER_SCALE,
+        2 * RENDER_SCALE,
+        fontHeight
     );
 
-    DeleteObject(
-        renderBitmap
-    );
+    // Downsample 2x -> normal size.
+    HDC finalDC =
+        CreateCompatibleDC(
+            targetDC
+        );
 
-    DeleteObject(
-        finalBitmap
-    );
+    BITMAPINFO finalBmi = {};
 
-    DeleteDC(renderDC);
+    finalBmi.bmiHeader.biSize =
+        sizeof(BITMAPINFOHEADER);
+
+    finalBmi.bmiHeader.biWidth =
+        width;
+
+    finalBmi.bmiHeader.biHeight =
+        -height;
+
+    finalBmi.bmiHeader.biPlanes =
+        1;
+
+    finalBmi.bmiHeader.biBitCount =
+        32;
+
+    finalBmi.bmiHeader.biCompression =
+        BI_RGB;
+
+    void* finalBits = nullptr;
+
+    HBITMAP finalBitmap =
+        CreateDIBSection(
+            targetDC,
+            &finalBmi,
+            DIB_RGB_COLORS,
+            &finalBits,
+            nullptr,
+            0
+        );
+
+    if (finalBitmap)
+    {
+        HBITMAP oldFinal =
+            static_cast<HBITMAP>(
+                SelectObject(
+                    finalDC,
+                    finalBitmap
+                )
+            );
+
+        BYTE* src =
+            static_cast<BYTE*>(bits);
+
+        BYTE* dst =
+            static_cast<BYTE*>(finalBits);
+
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                int sx =
+                    x * RENDER_SCALE;
+
+                int sy =
+                    y * RENDER_SCALE;
+
+                unsigned int b = 0;
+                unsigned int g = 0;
+                unsigned int r = 0;
+
+                for (int yy = 0; yy < RENDER_SCALE; ++yy)
+                {
+                    for (int xx = 0; xx < RENDER_SCALE; ++xx)
+                    {
+                        BYTE* pixel =
+                            src +
+                            ((sy + yy) * scaledWidth + (sx + xx)) * 4;
+
+                        b += pixel[0];
+                        g += pixel[1];
+                        r += pixel[2];
+                    }
+                }
+
+                int samples =
+                    RENDER_SCALE *
+                    RENDER_SCALE;
+
+                BYTE* out =
+                    dst +
+                    (y * width + x) * 4;
+
+                out[0] =
+                    static_cast<BYTE>(
+                        b / samples
+                    );
+
+                out[1] =
+                    static_cast<BYTE>(
+                        g / samples
+                    );
+
+                out[2] =
+                    static_cast<BYTE>(
+                        r / samples
+                    );
+
+                out[3] = 255;
+            }
+        }
+
+        BitBlt(
+            targetDC,
+            0,
+            0,
+            width,
+            height,
+            finalDC,
+            0,
+            0,
+            SRCCOPY
+        );
+
+        SelectObject(
+            finalDC,
+            oldFinal
+        );
+
+        DeleteObject(
+            finalBitmap
+        );
+    }
+
     DeleteDC(finalDC);
 
-    ReleaseDC(
-        nullptr,
-        screenDC
+    SelectObject(
+        highDC,
+        oldBitmap
     );
+
+    DeleteObject(bitmap);
+
+    DeleteDC(highDC);
 }
+
 
 // ============================================================
 // CLICKABLE MODE
 // ============================================================
 
 void SetClickableMode(
-    bool enabled
+    bool clickable
 )
 {
     clickableMode =
-        enabled;
+        clickable;
+
+    LONG_PTR style =
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE
+        );
 
     LONG_PTR exStyle =
         GetWindowLongPtrW(
@@ -1531,48 +1189,35 @@ void SetClickableMode(
 
     if (clickableMode)
     {
+        style |= WS_THICKFRAME;
+
         exStyle &=
             ~WS_EX_TRANSPARENT;
-
-        exStyle |=
-            WS_EX_LAYERED |
-            WS_EX_TOPMOST;
-    }
-    else
-    {
-        exStyle |=
-            WS_EX_TRANSPARENT |
-            WS_EX_LAYERED |
-            WS_EX_TOPMOST;
-    }
-
-    SetWindowLongPtrW(
-        hwnd,
-        GWL_EXSTYLE,
-        exStyle
-    );
-
-    LONG_PTR style =
-        GetWindowLongPtrW(
-            hwnd,
-            GWL_STYLE
-        );
-
-    if (clickableMode)
-    {
-        style |=
-            WS_THICKFRAME;
     }
     else
     {
         style &=
             ~WS_THICKFRAME;
+
+        exStyle |=
+            WS_EX_TRANSPARENT;
     }
+
+    exStyle |=
+        WS_EX_LAYERED |
+        WS_EX_TOPMOST |
+        WS_EX_TOOLWINDOW;
 
     SetWindowLongPtrW(
         hwnd,
         GWL_STYLE,
         style
+    );
+
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        exStyle
     );
 
     SetWindowPos(
@@ -1582,32 +1227,86 @@ void SetClickableMode(
         overlayY,
         overlayWidth,
         overlayHeight,
-        SWP_NOACTIVATE |
         SWP_FRAMECHANGED |
+        SWP_NOACTIVATE |
         SWP_SHOWWINDOW
     );
 
-    DrawOverlay();
+    InvalidateRect(
+        hwnd,
+        nullptr,
+        TRUE
+    );
 }
+
+
+// ============================================================
+// TRAY ICON
+// ============================================================
+
+void AddTrayIcon()
+{
+    NOTIFYICONDATAW nid = {};
+
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID = 1;
+
+    nid.uFlags =
+        NIF_MESSAGE |
+        NIF_ICON |
+        NIF_TIP;
+
+    nid.uCallbackMessage =
+        WM_TRAYICON;
+
+    nid.hIcon =
+        LoadIconW(
+            nullptr,
+            IDI_APPLICATION
+        );
+
+    lstrcpyW(
+        nid.szTip,
+        L"APM Overlay"
+    );
+
+    Shell_NotifyIconW(
+        NIM_ADD,
+        &nid
+    );
+}
+
+
+void RemoveTrayIcon()
+{
+    NOTIFYICONDATAW nid = {};
+
+    nid.cbSize =
+        sizeof(nid);
+
+    nid.hWnd =
+        hwnd;
+
+    nid.uID = 1;
+
+    Shell_NotifyIconW(
+        NIM_DELETE,
+        &nid
+    );
+}
+
 
 // ============================================================
 // TRAY MENU
 // ============================================================
 
-#define WM_TRAYICON     (WM_USER + 1)
-
-#define ID_TRAY_CLICK   1001
-#define ID_TRAY_RESET   1002
-#define ID_TRAY_EXIT    1003
-
 void ShowTrayMenu()
 {
-    POINT pt;
-
-    GetCursorPos(
-        &pt
-    );
-
     HMENU menu =
         CreatePopupMenu();
 
@@ -1623,13 +1322,18 @@ void ShowTrayMenu()
             : L"Clickable Mode"
     );
 
-    // This is the ONLY reset control.
-    // It resets APM + input counts + timeline.
     AppendMenuW(
         menu,
         MF_STRING,
         ID_TRAY_RESET,
         L"Reset APM"
+    );
+
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ID_TRAY_INPUT,
+        L"Reset Input Tracker"
     );
 
     AppendMenuW(
@@ -1646,165 +1350,134 @@ void ShowTrayMenu()
         L"Exit"
     );
 
+    POINT point;
+
+    GetCursorPos(
+        &point
+    );
+
     SetForegroundWindow(
         hwnd
     );
 
     TrackPopupMenu(
         menu,
-        TPM_RIGHTBUTTON,
-        pt.x,
-        pt.y,
+        TPM_RIGHTBUTTON |
+        TPM_BOTTOMALIGN,
+        point.x,
+        point.y,
         0,
         hwnd,
         nullptr
     );
 
-    DestroyMenu(
-        menu
-    );
+    DestroyMenu(menu);
 }
+
 
 // ============================================================
 // WINDOW PROCEDURE
 // ============================================================
 
-LRESULT CALLBACK WindowProc(
+LRESULT CALLBACK WndProc(
     HWND window,
-    UINT msg,
+    UINT message,
     WPARAM wParam,
     LPARAM lParam
 )
 {
-    switch (msg)
+    switch (message)
     {
-        case WM_TIMER:
-        {
-            if (wParam == 1)
-                DrawOverlay();
+    case WM_TRAYICON:
 
-            return 0;
+        if (
+            lParam == WM_RBUTTONUP ||
+            lParam == WM_CONTEXTMENU
+        )
+        {
+            ShowTrayMenu();
         }
 
-        case WM_ERASEBKGND:
-            return 1;
+        return 0;
 
-        case WM_PAINT:
+
+    case WM_COMMAND:
+
+        switch (LOWORD(wParam))
         {
-            PAINTSTRUCT ps;
+        case ID_TRAY_CLICK:
 
-            BeginPaint(
-                window,
-                &ps
+            SetClickableMode(
+                !clickableMode
             );
 
-            EndPaint(
-                window,
-                &ps
+            return 0;
+
+
+        case ID_TRAY_RESET:
+
+            // APM ONLY.
+            ResetAPM();
+
+            return 0;
+
+
+        case ID_TRAY_INPUT:
+
+            // INPUT TRACKER ONLY.
+            ResetInputTracker();
+
+            return 0;
+
+
+        case ID_TRAY_EXIT:
+
+            DestroyWindow(
+                hwnd
             );
 
-            DrawOverlay();
-
             return 0;
         }
 
-        case WM_MOVE:
+        break;
+
+
+    case WM_NCHITTEST:
+
+        if (!clickableMode)
+            return HTTRANSPARENT;
+
         {
-            RECT rect;
-
-            if (
-                GetWindowRect(
-                    window,
-                    &rect
-                )
-            )
-            {
-                overlayX =
-                    rect.left;
-
-                overlayY =
-                    rect.top;
-
-                SaveSettings();
-            }
-
-            return 0;
-        }
-
-        case WM_SIZE:
-        {
-            RECT rect;
-
-            if (
-                GetWindowRect(
-                    window,
-                    &rect
-                )
-            )
-            {
-                overlayX =
-                    rect.left;
-
-                overlayY =
-                    rect.top;
-
-                overlayWidth =
-                    rect.right -
-                    rect.left;
-
-                overlayHeight =
-                    rect.bottom -
-                    rect.top;
-
-                SaveSettings();
-            }
-
-            return 0;
-        }
-
-        case WM_NCHITTEST:
-        {
-            if (!clickableMode)
-                return HTTRANSPARENT;
-
-            POINT pt =
-            {
+            POINT pt = {
                 GET_X_LPARAM(lParam),
                 GET_Y_LPARAM(lParam)
             };
 
+            ScreenToClient(
+                window,
+                &pt
+            );
+
             RECT rect;
 
-            GetWindowRect(
+            GetClientRect(
                 window,
                 &rect
             );
 
-            int x =
-                pt.x -
-                rect.left;
-
-            int y =
-                pt.y -
-                rect.top;
-
             const int grip = 8;
 
             bool left =
-                x < grip;
+                pt.x <= grip;
 
             bool right =
-                x >=
-                overlayWidth -
-                grip;
+                pt.x >= rect.right - grip;
 
             bool top =
-                y < grip;
+                pt.y <= grip;
 
             bool bottom =
-                y >=
-                overlayHeight -
-                grip;
+                pt.y >= rect.bottom - grip;
 
             if (top && left)
                 return HTTOPLEFT;
@@ -1825,116 +1498,179 @@ LRESULT CALLBACK WindowProc(
                 return HTRIGHT;
 
             if (top)
-                return HTTOP;
+                return HTCAPTION;
 
             if (bottom)
                 return HTBOTTOM;
 
-            if (
-                y >= 0 &&
-                y < TOP_BAR_HEIGHT
-            )
-            {
-                return HTCAPTION;
-            }
-
             return HTCLIENT;
         }
 
-        case WM_TRAYICON:
+
+    case WM_MOVE:
+
+        overlayX =
+            static_cast<int>(
+                static_cast<short>(
+                    LOWORD(lParam)
+                )
+            );
+
+        overlayY =
+            static_cast<int>(
+                static_cast<short>(
+                    HIWORD(lParam)
+                )
+            );
+
+        SaveSettings();
+
+        return 0;
+
+
+    case WM_SIZE:
+
+        if (
+            wParam != SIZE_MINIMIZED
+        )
         {
-            if (
-                lParam ==
-                WM_RBUTTONUP
-            )
-            {
-                ShowTrayMenu();
-            }
+            overlayWidth =
+                LOWORD(lParam);
 
-            return 0;
-        }
+            overlayHeight =
+                HIWORD(lParam);
 
-        case WM_COMMAND:
-        {
-            switch (
-                LOWORD(wParam)
-            )
-            {
-                case ID_TRAY_CLICK:
+            if (overlayWidth < 50)
+                overlayWidth = 50;
 
-                    SetClickableMode(
-                        !clickableMode
-                    );
+            if (overlayHeight < 20)
+                overlayHeight = 20;
 
-                    return 0;
-
-                case ID_TRAY_RESET:
-
-                    // Reset APM,
-                    // counts,
-                    // and timeline.
-                    ResetEverything();
-
-                    return 0;
-
-                case ID_TRAY_EXIT:
-
-                    DestroyWindow(
-                        window
-                    );
-
-                    return 0;
-            }
-
-            break;
-        }
-
-        case WM_DESTROY:
-        {
             SaveSettings();
-
-            SaveInputStats();
-
-            if (keyboardHook)
-            {
-                UnhookWindowsHookEx(
-                    keyboardHook
-                );
-
-                keyboardHook =
-                    nullptr;
-            }
-
-            if (mouseHook)
-            {
-                UnhookWindowsHookEx(
-                    mouseHook
-                );
-
-                mouseHook =
-                    nullptr;
-            }
-
-            KillTimer(
-                window,
-                1
-            );
-
-            PostQuitMessage(
-                0
-            );
-
-            return 0;
         }
+
+        return 0;
+
+
+    case WM_TIMER:
+
+        if (wParam == 1)
+        {
+            EnterCriticalSection(
+                &actionLock
+            );
+
+            RemoveOldActionsLocked();
+
+            LeaveCriticalSection(
+                &actionLock
+            );
+
+            InvalidateRect(
+                window,
+                nullptr,
+                FALSE
+            );
+        }
+
+        return 0;
+
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+
+        HDC dc =
+            BeginPaint(
+                window,
+                &ps
+            );
+
+        DrawOverlay(
+            dc
+        );
+
+        // Visible white resize bar in clickable mode.
+        if (clickableMode)
+        {
+            RECT bar = {
+                0,
+                0,
+                overlayWidth,
+                TOP_BAR_HEIGHT
+            };
+
+            HBRUSH brush =
+                CreateSolidBrush(
+                    RGB(255, 255, 255)
+                );
+
+            FillRect(
+                dc,
+                &bar,
+                brush
+            );
+
+            DeleteObject(brush);
+        }
+
+        EndPaint(
+            window,
+            &ps
+        );
+
+        return 0;
+    }
+
+
+    case WM_ERASEBKGND:
+
+        return 1;
+
+
+    case WM_DESTROY:
+
+        SaveSettings();
+        SaveInputStats();
+
+        KillTimer(
+            window,
+            1
+        );
+
+        if (keyboardHook)
+        {
+            UnhookWindowsHookEx(
+                keyboardHook
+            );
+
+            keyboardHook = nullptr;
+        }
+
+        if (mouseHook)
+        {
+            UnhookWindowsHookEx(
+                mouseHook
+            );
+
+            mouseHook = nullptr;
+        }
+
+        RemoveTrayIcon();
+
+        PostQuitMessage(0);
+
+        return 0;
     }
 
     return DefWindowProcW(
         window,
-        msg,
+        message,
         wParam,
         lParam
     );
 }
+
 
 // ============================================================
 // WINMAIN
@@ -1959,7 +1695,7 @@ int WINAPI WinMain(
     WNDCLASSW wc = {};
 
     wc.lpfnWndProc =
-        WindowProc;
+        WndProc;
 
     wc.hInstance =
         hInstance;
@@ -1968,25 +1704,24 @@ int WINAPI WinMain(
         CLASS_NAME;
 
     wc.hCursor =
-        LoadCursor(
+        LoadCursorW(
             nullptr,
             IDC_ARROW
         );
+
+    wc.hbrBackground =
+        nullptr;
 
     RegisterClassW(
         &wc
     );
 
-    DWORD exStyle =
-        WS_EX_LAYERED |
-        WS_EX_TOPMOST |
-        WS_EX_TOOLWINDOW |
-        WS_EX_TRANSPARENT |
-        WS_EX_NOACTIVATE;
-
     hwnd =
         CreateWindowExW(
-            exStyle,
+            WS_EX_LAYERED |
+            WS_EX_TOPMOST |
+            WS_EX_TOOLWINDOW |
+            WS_EX_TRANSPARENT,
             CLASS_NAME,
             L"APM Overlay",
             WS_POPUP,
@@ -2009,53 +1744,19 @@ int WINAPI WinMain(
         return 1;
     }
 
-    // ========================================================
-    // TRAY ICON
-    // ========================================================
-
-    NOTIFYICONDATAW nid = {};
-
-    nid.cbSize =
-        sizeof(nid);
-
-    nid.hWnd =
-        hwnd;
-
-    nid.uID =
-        1;
-
-    nid.uFlags =
-        NIF_ICON |
-        NIF_MESSAGE |
-        NIF_TIP;
-
-    nid.uCallbackMessage =
-        WM_TRAYICON;
-
-    nid.hIcon =
-        LoadIcon(
-            nullptr,
-            IDI_APPLICATION
-        );
-
-    wcscpy_s(
-        nid.szTip,
-        L"APM Overlay"
+    SetLayeredWindowAttributes(
+        hwnd,
+        RGB(0, 0, 0),
+        0,
+        LWA_COLORKEY
     );
 
-    Shell_NotifyIconW(
-        NIM_ADD,
-        &nid
-    );
-
-    // ========================================================
-    // HOOKS
-    // ========================================================
+    AddTrayIcon();
 
     keyboardHook =
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
-            KeyboardHookProc,
+            KeyboardProc,
             hInstance,
             0
         );
@@ -2063,22 +1764,13 @@ int WINAPI WinMain(
     mouseHook =
         SetWindowsHookExW(
             WH_MOUSE_LL,
-            MouseHookProc,
+            MouseProc,
             hInstance,
             0
         );
 
-    // ========================================================
-    // PASS-THROUGH MODE
-    // ========================================================
-
-    SetClickableMode(
-        false
-    );
-
-    // ========================================================
-    // REFRESH
-    // ========================================================
+    // Start in pass-through mode.
+    SetClickableMode(false);
 
     SetTimer(
         hwnd,
@@ -2092,15 +1784,7 @@ int WINAPI WinMain(
         SW_SHOWNOACTIVATE
     );
 
-    UpdateWindow(
-        hwnd
-    );
-
-    DrawOverlay();
-
-    // ========================================================
-    // MESSAGE LOOP
-    // ========================================================
+    UpdateWindow(hwnd);
 
     MSG msg;
 
@@ -2121,26 +1805,6 @@ int WINAPI WinMain(
             &msg
         );
     }
-
-    // ========================================================
-    // REMOVE TRAY ICON
-    // ========================================================
-
-    NOTIFYICONDATAW removeIcon = {};
-
-    removeIcon.cbSize =
-        sizeof(removeIcon);
-
-    removeIcon.hWnd =
-        hwnd;
-
-    removeIcon.uID =
-        1;
-
-    Shell_NotifyIconW(
-        NIM_DELETE,
-        &removeIcon
-    );
 
     DeleteCriticalSection(
         &actionLock
